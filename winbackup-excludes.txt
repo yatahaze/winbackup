@@ -152,15 +152,49 @@ ProgramData/Backblaze/
 ProgramData/NVIDIA Corporation/Installer2/
 ProgramData/Topaz Labs LLC/
 
-# ---- big game installs under C:\Apps that are not wanted (saves are in Saved Games / Documents) ----
-# leading "/" anchors to the drive root; [Aa] matches either capitalisation
-/[Aa]pps/Diablo II/
-/[Aa]pps/Diablo IV/
+# ---- Blizzard / Battle.net game installs (re-downloadable through the launcher) ----
+# Saves and settings are NOT here: they live in Documents\<Game>, Saved Games\<Game>,
+# AppData\Roaming\Battle.net and AppData\Local\Blizzard Entertainment, which the profile copy keeps.
+# "/*/<Game>/" = a game folder directly inside ANY top-level folder (Program Files (x86), Apps, Games...),
+# "/*/*/<Game>/" = one level deeper (e.g. Games\Blizzard\Diablo IV). Users\x\Documents\Diablo IV is
+# four levels deep so it is not matched. Classic Diablo II kept saves in its own Save\ folder: if you
+# still play that one, delete its two lines.
+/*/Battle.net/
+/*/*/Battle.net/
+/*/Diablo II/
+/*/*/Diablo II/
+/*/Diablo II Resurrected/
+/*/*/Diablo II Resurrected/
+/*/Diablo III/
+/*/*/Diablo III/
+/*/Diablo IV/
+/*/*/Diablo IV/
+/*/Diablo Immortal/
+/*/*/Diablo Immortal/
+/*/Hearthstone/
+/*/*/Hearthstone/
+/*/Heroes of the Storm/
+/*/*/Heroes of the Storm/
+/*/Overwatch/
+/*/*/Overwatch/
+/*/StarCraft/
+/*/*/StarCraft/
+/*/StarCraft II/
+/*/*/StarCraft II/
+/*/Warcraft III/
+/*/*/Warcraft III/
+/*/Warcraft I & II Remastered/
+/*/*/Warcraft I & II Remastered/
+/*/Call of Duty*/
+/*/*/Call of Duty*/
 # World of Warcraft: drop the ~100 GB of game data but keep _retail_\WTF (settings, macros) and
-# Interface\AddOns. To drop the whole folder instead, replace these two lines with:  /[Aa]pps/World of Warcraft/
-/[Aa]pps/World of Warcraft/_*_/Data/
-/[Aa]pps/World of Warcraft/_*_/Cache/
-/Program Files (x86)/Warcraft III/
+# Interface\AddOns. To drop the whole folder instead, replace these with:  /*/World of Warcraft/
+/*/World of Warcraft/_*_/Data/
+/*/World of Warcraft/_*_/Cache/
+/*/*/World of Warcraft/_*_/Data/
+/*/*/World of Warcraft/_*_/Cache/
+ProgramData/Battle.net/
+ProgramData/Blizzard Entertainment/
 
 # ---- optional: uncomment if you want smaller backups ----
 # *.ost                                 Outlook offline mailbox copies (re-synced from the server)
