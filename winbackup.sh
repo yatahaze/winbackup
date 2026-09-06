@@ -447,13 +447,19 @@ def status():
     return ('\x1b[2K' + l1[:w-1] + '\n\x1b[2K  > ' + c[:w-5] + '\x1b[1A\r')
 def draw(): sys.stdout.write('\r' + status()); sys.stdout.flush()
 def scroll(name):
-    # a finished/started file scrolls past above the two pinned status lines
-    global lastname, skipped
+    # every file scrolls past above the two pinned status lines; the status itself is redrawn at
+    # most ~7x/s. Only beyond ~500 names/s (more than a terminal can draw, where rsync would stall
+    # waiting on the screen) are names grouped as "+N more".
+    global lastname, skipped, last
     now = time.time()
-    if now - lastname < 0.04: skipped += 1; return   # at most ~25 names/s reach the terminal
+    if now - lastname < 0.002: skipped += 1; return
     extra = f'   (+{skipped} more)' if skipped else ''; skipped = 0; lastname = now
     w = cols(); n = name if len(name) < w - 3 else '...' + name[-(w - 6):]
-    sys.stdout.write('\r\x1b[2K' + n[:w-1] + extra + '\n' + status()); sys.stdout.flush()
+    if now - last > 0.15:
+        sys.stdout.write('\r\x1b[2K' + n[:w-1] + extra + '\n' + status()); last = now
+    else:
+        sys.stdout.write('\r\x1b[2K' + n[:w-1] + extra + '\n\x1b[2K\n\x1b[2K\x1b[1A\x1b[1A\r' + status())
+    sys.stdout.flush()
 buf = ''
 while True:
     chunk = sys.stdin.buffer.read(8192)
