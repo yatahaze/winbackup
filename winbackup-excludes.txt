@@ -157,6 +157,7 @@ ProgramData/USOShared/
 # Interface\AddOns. To drop the whole folder instead, replace these two lines with:  /[Aa]pps/World of Warcraft/
 /[Aa]pps/World of Warcraft/_*_/Data/
 /[Aa]pps/World of Warcraft/_*_/Cache/
+/Program Files (x86)/Warcraft III/
 
 # ---- optional: uncomment if you want smaller backups ----
 # *.ost                                 Outlook offline mailbox copies (re-synced from the server)
