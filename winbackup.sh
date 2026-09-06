@@ -379,8 +379,11 @@ sanitize() { printf '%s' "$1" | tr -c 'A-Za-z0-9._ -' '_'; }
 read -r -d '' PY_PROGRESS <<'PY'
 import sys, re, time, os
 label, offset, total, statsfile = sys.argv[1], int(sys.argv[2]), int(sys.argv[3]), sys.argv[4]
+ftotal, foffset = (int(sys.argv[5]), int(sys.argv[6])) if len(sys.argv) > 6 else (0, 0)
 prog = re.compile(r'^\s*([\d,]+)\s+(\d+)%\s+(\S+)\s+(\d+:\d+:\d+)')
 statkeys = ('Number of files', 'Number of regular files transferred', 'Total file size', 'Total transferred file size')
+def fmt_eta(sec): return f'{int(sec//3600)}:{int(sec%3600//60):02d}:{int(sec%60):02d}'
+fhist = []   # (time, nfiles) samples for a rolling files/s
 noise = ('sending incremental', 'sent ', 'total size', 'Number of', 'Total ', 'File list', 'Literal data',
          'Matched data', 'skipping', 'created directory', 'rsync', '(DRY RUN)', 'delta-transmission')
 def hr(n):
@@ -395,12 +398,18 @@ nfiles, lastname, skipped = 0, 0.0, 0
 def status():
     ov = min(offset + done, total) if total else 0
     pct = int(100 * ov / total) if total else 100
-    el = time.time() - t0
-    eta = ''
-    if done > 0 and el > 2 and total:
-        rem = (total - ov) / (done / el); eta = f'ETA {int(rem//3600)}:{int(rem%3600//60):02d}:{int(rem%60):02d}'
+    now = time.time(); el = now - t0
+    fhist.append((now, nfiles)); 
+    while len(fhist) > 2 and now - fhist[0][0] > 10: fhist.pop(0)
+    fps = (nfiles - fhist[0][1]) / (now - fhist[0][0]) if now - fhist[0][0] > 1 else 0
+    # two ETAs: by bytes (good for big files) and by file count (good for small-file phases); show the longer
+    etas = []
+    if done > 0 and el > 2 and total: etas.append((total - ov) / (done / el))
+    if ftotal and el > 5 and nfiles > 0: etas.append(max(0, ftotal - foffset - nfiles) / (nfiles / el))
+    eta = f'ETA {fmt_eta(max(etas))}' if etas else ''
+    fpart = f'files {foffset + nfiles}/{ftotal} ({fps:.0f}/s)' if ftotal else f'files:{nfiles} ({fps:.0f}/s)'
     w = cols()
-    l1 = f'{label} {pct:3d}%  {hr(ov)} / {hr(total)}  {rate}  {eta}  files:{nfiles}'
+    l1 = f'{label} {pct:3d}%  {hr(ov)} / {hr(total)}  {rate}  {fpart}  {eta}'
     c = cur if len(cur) < w - 3 else '...' + cur[-(w - 6):]
     return ('\x1b[2K' + l1[:w-1] + '\n\x1b[2K  > ' + c[:w-5] + '\x1b[1A\r')
 def draw(): sys.stdout.write('\r' + status()); sys.stdout.flush()
@@ -641,10 +650,10 @@ prog = re.compile(r'^\s*([\d,]+)\s+(\d+)%\s+(\S+)\s+(\d+:\d+:\d+)')
 statkeys = ('Number of files', 'Number of regular files transferred', 'Total file size', 'Total transferred file size')
 noise = ('sending incremental', 'sent ', 'total size', 'Number of', 'Total ', 'File list', 'Literal data',
          'Matched data', 'skipping', 'created directory', 'rsync', '(DRY RUN)', 'delta-transmission')
-stats, cur, done, last, buf = [], '', 0, 0.0, ''
+stats, cur, done, last, buf, nfiles = [], '', 0, 0.0, '', 0
 def flush():
     tmp = state + '.tmp'
-    with open(tmp, 'w') as f: f.write(f'{done}\t{cur}')
+    with open(tmp, 'w') as f: f.write(f'{done}\t{nfiles}\t{cur}')
     os.replace(tmp, state)
 while True:
     chunk = sys.stdin.buffer.read(8192)
@@ -656,7 +665,9 @@ while True:
         m = prog.match(line)
         if m: done = int(m.group(1).replace(',', ''))
         elif line.startswith(statkeys): stats.append(line)
-        elif not line.startswith(noise): cur = line
+        elif not line.startswith(noise):
+            cur = line
+            if not line.endswith('/'): nfiles += 1
         if time.time() - last > 0.2: flush(); last = time.time()
 flush()
 with open(statsfile, 'w') as f: f.write('\n'.join(stats) + '\n')
@@ -667,6 +678,8 @@ PY
 read -r -d '' PY_MULTI <<'PY'
 import sys, os, time, glob
 label, sdir, offset, total = sys.argv[1], sys.argv[2], int(sys.argv[3]), int(sys.argv[4])
+ftotal, foffset = (int(sys.argv[5]), int(sys.argv[6])) if len(sys.argv) > 6 else (0, 0)
+fhist = []
 def hr(n):
     for u in ('B','K','M','G','T'):
         if n < 1024 or u == 'T': return f'{n:.1f}{u}' if u != 'B' else f'{int(n)}B'
@@ -677,22 +690,27 @@ def cols():
 t0 = time.time(); states = sorted(glob.glob(os.path.join(sdir, 'w*.state')))
 n = len(states); drawn = 0
 while True:
-    done = 0; lines = []; finished = 0
+    done = 0; lines = []; finished = 0; nfiles = 0
     for st in states:
         try:
-            b, cur = open(st).read().split('\t', 1)
-        except (OSError, ValueError): b, cur = '0', ''
-        done += int(b or 0)
+            b, nf, cur = open(st).read().split('\t', 2)
+        except (OSError, ValueError): b, nf, cur = '0', '0', ''
+        done += int(b or 0); nfiles += int(nf or 0)
         fin = os.path.exists(st + '.done'); finished += fin
         w = cols(); tag = 'done ' if fin else 'copy '
         lines.append(('  ' + tag + (cur if len(cur) < w - 10 else '...' + cur[-(w - 13):]))[:w-1])
     ov = min(offset + done, total) if total else 0
     pct = int(100 * ov / total) if total else 100
-    el = time.time() - t0; rate = done / el if el > 0 else 0
-    eta = ''
-    if rate > 0 and el > 2 and total:
-        rem = (total - ov) / rate; eta = f'ETA {int(rem//3600)}:{int(rem%3600//60):02d}:{int(rem%60):02d}'
-    l1 = f'{label}  overall {pct:3d}%  {hr(ov)} / {hr(total)}   {hr(rate)}/s  {eta}   ({n} workers)'
+    now = time.time(); el = now - t0; rate = done / el if el > 0 else 0
+    fhist.append((now, nfiles))
+    while len(fhist) > 2 and now - fhist[0][0] > 10: fhist.pop(0)
+    fps = (nfiles - fhist[0][1]) / (now - fhist[0][0]) if now - fhist[0][0] > 1 else 0
+    etas = []
+    if rate > 0 and el > 2 and total: etas.append((total - ov) / rate)
+    if ftotal and el > 5 and nfiles > 0: etas.append(max(0, ftotal - foffset - nfiles) / (nfiles / el))
+    eta = f'ETA {int(max(etas)//3600)}:{int(max(etas)%3600//60):02d}:{int(max(etas)%60):02d}' if etas else ''
+    fpart = f'files {foffset + nfiles}/{ftotal} ({fps:.0f}/s)' if ftotal else f'files:{nfiles} ({fps:.0f}/s)'
+    l1 = f'{label} {pct:3d}%  {hr(ov)} / {hr(total)}  {hr(rate)}/s  {fpart}  {eta}  ({n} workers)'
     out = '\r\x1b[2K' + l1[:cols()-1] + ''.join('\n\x1b[2K' + l for l in lines)
     sys.stdout.write(out + f'\x1b[{len(lines)}A\r' if lines else out); sys.stdout.flush()
     if finished == n and n > 0: break
@@ -717,7 +735,7 @@ copy_parallel() {
       echo "${PIPESTATUS[0]}" >"$sdir/rc$w" ) &
     pids+=($!)
   done
-  python3 -c "$PY_MULTI" "[${DRV_NAME[$i]}]" "$sdir" "$offset" "$TOT_XFER"
+  python3 -c "$PY_MULTI" "[${DRV_NAME[$i]}]" "$sdir" "$offset" "$TOT_XFER" "$TOT_N" "$foffset"
   wait "${pids[@]}" 2>/dev/null
   P_RC=0; P_COPIED=0; P_NCOPIED=0
   for (( w=0; w<N; w++ )); do
@@ -1254,7 +1272,7 @@ $( [ "$DRY" = 1 ] && echo 'DRY RUN: nothing will be written.' )" \
   clear 2>/dev/null
   echo "winbackup $VERSION  $( [ "$DRY" = 1 ] && echo '*** DRY RUN ***' )"
   echo "-> $DST"; echo
-  local offset=0 FAILED=0 rc COPIED=0 NCOPIED=0
+  local offset=0 foffset=0 FAILED=0 rc COPIED=0 NCOPIED=0
   for i in "${!DRV_ROOT[@]}"; do
     [ -n "${DRV_WANT[$i]}" ] || continue
     local dest="$DST/${DRV_PREFIX[$i]}" st="$WORK/stats_$i"
@@ -1268,7 +1286,7 @@ $( [ "$DRY" = 1 ] && echo 'DRY RUN: nothing will be written.' )" \
       rs "${RS_BASE[@]}" --outbuf=N --info=progress2,name1 --stats \
         $( [ "$DRY" = 1 ] && printf -- '--dry-run' ) \
         --exclude-from="$EXC_USED" --filter="merge $WORK/filter_$i" "${DRV_ROOT[$i]}/" "$dest/" 2>>"$ERRLOG" \
-        | python3 -c "$PY_PROGRESS" "[${DRV_NAME[$i]}]" "$offset" "$TOT_XFER" "$st"
+        | python3 -c "$PY_PROGRESS" "[${DRV_NAME[$i]}]" "$offset" "$TOT_XFER" "$st" "$TOT_N" "$foffset"
       rc=${PIPESTATUS[0]}
     fi
     case $rc in
@@ -1278,7 +1296,7 @@ $( [ "$DRY" = 1 ] && echo 'DRY RUN: nothing will be written.' )" \
     esac
     COPIED=$((COPIED + $(stat_num "$st" 'Total transferred file size')))
     NCOPIED=$((NCOPIED + $(stat_num "$st" 'Number of regular files transferred')))
-    offset=$((offset + EST_XFER[i]))
+    offset=$((offset + EST_XFER[i])); foffset=$((foffset + EST_NFILES[i]))
   done
   local ERRN; ERRN=$(grep -c '^rsync:' "$ERRLOG" 2>/dev/null); ERRN=${ERRN:-0}
 
