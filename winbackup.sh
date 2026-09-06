@@ -6,6 +6,7 @@
 #   sudo bash winbackup.sh --restore       copy categories from a previous backup back onto a Windows drive
 #   sudo bash winbackup.sh --other-drives  also mount the other NTFS drives read-only and offer their folders
 #                                          and Steam libraries (default: only the one source drive is touched)
+#   sudo bash winbackup.sh --jobs N        number of rsync workers for the "parallel" start option (default 4)
 #   sudo bash winbackup.sh --src DIR --dst DIR [--extra DIR]...
 #                                          use already-mounted directories instead of picking partitions
 #   bash winbackup.sh --answers FILE ...   scripted mode: read menu answers from FILE (used by tests/selftest.sh)
@@ -32,7 +33,7 @@ cd / || exit 1   # never keep a cwd on a drive we may unmount; rsync aborts if g
 VERSION="2.0"
 
 # ---------------------------------------------------------------- args
-DRY=0; MODE=backup; SRC_OVERRIDE=""; DST_OVERRIDE=""; EXTRA_OVERRIDES=(); ANSWERS=""; EXCL_SUMMARY=1; OTHER=0
+DRY=0; MODE=backup; SRC_OVERRIDE=""; DST_OVERRIDE=""; EXTRA_OVERRIDES=(); ANSWERS=""; EXCL_SUMMARY=1; OTHER=0; JOBS=4; PARALLEL=0
 usage() { sed -n '2,12p' "$0" | sed 's/^# \{0,1\}//'; }
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -42,6 +43,7 @@ while [ $# -gt 0 ]; do
     --dst) DST_OVERRIDE=$2; shift;;
     --extra) EXTRA_OVERRIDES+=("$2"); OTHER=1; shift;;
     --other-drives) OTHER=1;;
+    --jobs) JOBS=$2; shift;;
     --answers) ANSWERS=$2; shift;;
     --no-excluded-summary) EXCL_SUMMARY=0;;
     -h|--help) usage; exit 0;;
@@ -380,16 +382,27 @@ def cols():
     try: return os.get_terminal_size().columns
     except OSError: return 100
 stats, cur, done, rate, t0, last = [], '', 0, '', time.time(), 0.0
-def draw():
+nfiles, lastname, skipped = 0, 0.0, 0
+def status():
     ov = min(offset + done, total) if total else 0
     pct = int(100 * ov / total) if total else 100
     el = time.time() - t0
     eta = ''
     if done > 0 and el > 2 and total:
         rem = (total - ov) / (done / el); eta = f'ETA {int(rem//3600)}:{int(rem%3600//60):02d}:{int(rem%60):02d}'
-    l1 = f'{label}  overall {pct:3d}%  {hr(ov)} / {hr(total)}   {rate}  {eta}'
-    w = cols(); l2 = '  ' + (cur if len(cur) < w - 3 else '...' + cur[-(w - 6):])
-    sys.stdout.write('\r\x1b[2K' + l1[:w-1] + '\n\x1b[2K' + l2[:w-1] + '\x1b[1A\r'); sys.stdout.flush()
+    w = cols()
+    l1 = f'{label} {pct:3d}%  {hr(ov)} / {hr(total)}  {rate}  {eta}  files:{nfiles}'
+    c = cur if len(cur) < w - 3 else '...' + cur[-(w - 6):]
+    return ('\x1b[2K' + l1[:w-1] + '\n\x1b[2K  > ' + c[:w-5] + '\x1b[1A\r')
+def draw(): sys.stdout.write('\r' + status()); sys.stdout.flush()
+def scroll(name):
+    # a finished/started file scrolls past above the two pinned status lines
+    global lastname, skipped
+    now = time.time()
+    if now - lastname < 0.04: skipped += 1; return   # at most ~25 names/s reach the terminal
+    extra = f'   (+{skipped} more)' if skipped else ''; skipped = 0; lastname = now
+    w = cols(); n = name if len(name) < w - 3 else '...' + name[-(w - 6):]
+    sys.stdout.write('\r\x1b[2K' + n[:w-1] + extra + '\n' + status()); sys.stdout.flush()
 buf = ''
 while True:
     chunk = sys.stdin.buffer.read(8192)
@@ -404,6 +417,7 @@ while True:
         elif line.startswith(statkeys):
             stats.append(line)
         elif not line.startswith(noise):
+            if not line.endswith('/'): nfiles += 1; scroll(line)
             cur = line
         if time.time() - last > 0.15:
             draw(); last = time.time()
@@ -552,6 +566,158 @@ RS_BASE=(-r -t --no-perms --no-owner --no-group --modify-window=2 --partial --in
 # rs: run rsync, recording the exact command line and exit code in $WORK/commands.log
 rs() { printf '%s rsync' "$(now)" >>"$WORK/commands.log"; printf ' %q' "$@" >>"$WORK/commands.log"; echo >>"$WORK/commands.log"
        rsync "$@"; local rc=$?; echo "  -> exit $rc" >>"$WORK/commands.log"; return $rc; }
+
+# ---------------------------------------------------------------- parallel copy
+# plan_workers drive-index N -> writes $WORK/wfilter_<i>_<w>; prints the number of workers that got work.
+# Work units start as the wanted leaves; a unit bigger than total/(2N) is split into its children
+# (down to 4 levels), then units are dealt biggest-first onto the least-loaded worker.
+# Each worker gets its own rsync filter: the drive's explicit excludes, includes for its units and
+# their ancestors, "- ancestor/*" so siblings stay out, and "- /*".
+plan_workers() {
+  local i=$1 N=$2 est="$WORK/est_$i" root=${DRV_ROOT[$i]} u w c depth b p
+  awk '/^[0-9]+ / && !/\/$/ { sz=$1+0; p=substr($0, length($1)+2); n=split(p, a, "/"); k=""
+         for (j=1; j<=n && j<=4; j++) { k=(j>1 ? k "/" : "") a[j]; s[k]+=sz } }
+       END { for (k in s) printf "%d\t%s\n", s[k], k }' "$est" >"$WORK/psizes_$i"
+  local -A SZ=(); while IFS=$'\t' read -r b p; do SZ[$p]=$b; done <"$WORK/psizes_$i"
+  local thr=$(( ${EST_XFER[$i]:-0} / (N * 2) + 1 )) units=() q=()
+  while IFS= read -r u; do [ -n "$u" ] && q+=("$u"); done <<<"${DRV_WANT[$i]}"
+  while [ ${#q[@]} -gt 0 ]; do
+    u=${q[0]}; q=("${q[@]:1}")
+    depth=$(( $(tr -cd '/' <<<"$u" | wc -c) + 1 ))
+    if [ -d "$root/$u" ] && [ "${SZ[$u]:-0}" -gt "$thr" ] && [ "$depth" -lt 4 ]; then
+      local any=0; for c in "$root/$u"/* "$root/$u"/.[!.]*; do [ -e "$c" ] || continue; q+=("$u/$(basename "$c")"); any=1; done
+      [ "$any" = 1 ] || units+=("$u")
+    else units+=("$u"); fi
+  done
+  # leaves overlap (e.g. Users/x from "everything else" and Users/x/Documents from "docs"): keep a
+  # unit only if none of its ancestors is also a unit, otherwise two workers would copy it twice
+  local -A pending=() kept=(); local -a uniq=()
+  for u in "${units[@]}"; do pending[$u]=1; done
+  for u in "${units[@]}"; do
+    [ -n "${pending[$u]:-}" ] || continue; unset "pending[$u]"    # exact duplicates: first one wins
+    p=$u; local covered=0
+    while [[ "$p" == */* ]]; do p=${p%/*}; [ -n "${pending[$p]:-}${kept[$p]:-}" ] && { covered=1; break; }; done
+    [ "$covered" = 1 ] || { uniq+=("$u"); kept[$u]=1; }
+  done
+  units=("${uniq[@]}")
+  local -a load=(); for (( w=0; w<N; w++ )); do load[$w]=0; : >"$WORK/wunits_${i}_$w"; done
+  while IFS=$'\t' read -r b u; do
+    local best=0; for (( w=1; w<N; w++ )); do [ "${load[$w]}" -lt "${load[$best]}" ] && best=$w; done
+    printf '%s\n' "$u" >>"$WORK/wunits_${i}_$best"; load[$best]=$(( load[best] + b ))
+  done < <(for u in "${units[@]}"; do printf '%s\t%s\n' "${SZ[$u]:-0}" "$u"; done | sort -t$'\t' -k1,1nr)
+  local used=0
+  for (( w=0; w<N; w++ )); do
+    [ -s "$WORK/wunits_${i}_$w" ] || continue
+    used=$((used+1))
+    local f="$WORK/wfilter_${i}_$w"; : >"$f"
+    declare -A leaf=() anc=()
+    while IFS= read -r u; do [ -n "$u" ] && echo "- /$u" >>"$f"; done <<<"${DRV_XCL[$i]}"
+    while IFS= read -r u; do leaf[$u]=1; p=$u; while [[ "$p" == */* ]]; do p=${p%/*}; anc[$p]=1; done; done <"$WORK/wunits_${i}_$w"
+    for u in "${!leaf[@]}"; do if [ -d "$root/$u" ]; then echo "+ /$(esc "$u")/" >>"$f"; else echo "+ /$(esc "$u")" >>"$f"; fi; done
+    for u in "${!anc[@]}"; do [ -n "${leaf[$u]:-}" ] || echo "+ /$(esc "$u")/" >>"$f"; done
+    for u in "${!anc[@]}"; do [ -n "${leaf[$u]:-}" ] || echo "- /$(esc "$u")/*" >>"$f"; done
+    echo "- /*" >>"$f"
+    unset leaf anc
+  done
+  echo "$used"
+}
+
+# Per-worker stdin filter: keeps a small state file (bytes<TAB>current file) fresh for the display,
+# writes the rsync --stats lines at the end and touches a done marker.
+read -r -d '' PY_WORKER <<'PY'
+import sys, re, time, os
+state, statsfile = sys.argv[1], sys.argv[2]
+prog = re.compile(r'^\s*([\d,]+)\s+(\d+)%\s+(\S+)\s+(\d+:\d+:\d+)')
+statkeys = ('Number of files', 'Number of regular files transferred', 'Total file size', 'Total transferred file size')
+noise = ('sending incremental', 'sent ', 'total size', 'Number of', 'Total ', 'File list', 'Literal data',
+         'Matched data', 'skipping', 'created directory', 'rsync', '(DRY RUN)', 'delta-transmission')
+stats, cur, done, last, buf = [], '', 0, 0.0, ''
+def flush():
+    tmp = state + '.tmp'
+    with open(tmp, 'w') as f: f.write(f'{done}\t{cur}')
+    os.replace(tmp, state)
+while True:
+    chunk = sys.stdin.buffer.read(8192)
+    if not chunk: break
+    buf += chunk.decode('utf-8', 'replace')
+    parts = re.split(r'[\r\n]', buf); buf = parts.pop()
+    for line in parts:
+        if not line.strip(): continue
+        m = prog.match(line)
+        if m: done = int(m.group(1).replace(',', ''))
+        elif line.startswith(statkeys): stats.append(line)
+        elif not line.startswith(noise): cur = line
+        if time.time() - last > 0.2: flush(); last = time.time()
+flush()
+with open(statsfile, 'w') as f: f.write('\n'.join(stats) + '\n')
+open(state + '.done', 'w').close()
+PY
+
+# Display for the parallel copy: sums the worker state files, shows overall % + one line per worker.
+read -r -d '' PY_MULTI <<'PY'
+import sys, os, time, glob
+label, sdir, offset, total = sys.argv[1], sys.argv[2], int(sys.argv[3]), int(sys.argv[4])
+def hr(n):
+    for u in ('B','K','M','G','T'):
+        if n < 1024 or u == 'T': return f'{n:.1f}{u}' if u != 'B' else f'{int(n)}B'
+        n /= 1024
+def cols():
+    try: return os.get_terminal_size().columns
+    except OSError: return 100
+t0 = time.time(); states = sorted(glob.glob(os.path.join(sdir, 'w*.state')))
+n = len(states); drawn = 0
+while True:
+    done = 0; lines = []; finished = 0
+    for st in states:
+        try:
+            b, cur = open(st).read().split('\t', 1)
+        except (OSError, ValueError): b, cur = '0', ''
+        done += int(b or 0)
+        fin = os.path.exists(st + '.done'); finished += fin
+        w = cols(); tag = 'done ' if fin else 'copy '
+        lines.append(('  ' + tag + (cur if len(cur) < w - 10 else '...' + cur[-(w - 13):]))[:w-1])
+    ov = min(offset + done, total) if total else 0
+    pct = int(100 * ov / total) if total else 100
+    el = time.time() - t0; rate = done / el if el > 0 else 0
+    eta = ''
+    if rate > 0 and el > 2 and total:
+        rem = (total - ov) / rate; eta = f'ETA {int(rem//3600)}:{int(rem%3600//60):02d}:{int(rem%60):02d}'
+    l1 = f'{label}  overall {pct:3d}%  {hr(ov)} / {hr(total)}   {hr(rate)}/s  {eta}   ({n} workers)'
+    out = '\r\x1b[2K' + l1[:cols()-1] + ''.join('\n\x1b[2K' + l for l in lines)
+    sys.stdout.write(out + f'\x1b[{len(lines)}A\r' if lines else out); sys.stdout.flush()
+    if finished == n and n > 0: break
+    time.sleep(0.3)
+sys.stdout.write('\n' * (len(lines) + 1)); sys.stdout.flush()
+PY
+
+# copy_parallel drive-index dest offset -> sets P_COPIED P_NCOPIED P_RC
+copy_parallel() {
+  local i=$1 dest=$2 offset=$3 N=$JOBS used w sdir="$WORK/par_$i"
+  mkdir -p "$sdir"; rm -f "$sdir"/*
+  used=$(plan_workers "$i" "$N")
+  echo "   $used parallel workers"
+  local pids=()
+  for (( w=0; w<N; w++ )); do
+    [ -f "$WORK/wfilter_${i}_$w" ] || continue
+    : >"$sdir/w$w.state"
+    ( rs "${RS_BASE[@]}" --outbuf=N --info=progress2,name1 --stats $( [ "$DRY" = 1 ] && printf -- '--dry-run' ) \
+        --exclude-from="$EXC_USED" --filter="merge $WORK/wfilter_${i}_$w" "${DRV_ROOT[$i]}/" "$dest/" 2>>"$sdir/err$w" \
+        | python3 -c "$PY_WORKER" "$sdir/w$w.state" "$sdir/stats$w"
+      echo "${PIPESTATUS[0]}" >"$sdir/rc$w" ) &
+    pids+=($!)
+  done
+  python3 -c "$PY_MULTI" "[${DRV_NAME[$i]}]" "$sdir" "$offset" "$TOT_XFER"
+  wait "${pids[@]}" 2>/dev/null
+  P_RC=0; P_COPIED=0; P_NCOPIED=0
+  for (( w=0; w<N; w++ )); do
+    [ -f "$sdir/rc$w" ] || continue
+    local rc; rc=$(cat "$sdir/rc$w")
+    [ "$rc" = 0 ] || { [ "$P_RC" = 0 ] && P_RC=$rc; [ "$rc" != 23 ] && [ "$rc" != 24 ] && P_RC=$rc; }
+    { echo "--- worker $w (exit $rc)"; cat "$sdir/err$w"; } >>"$ERRLOG"
+    P_COPIED=$((P_COPIED + $(stat_num "$sdir/stats$w" 'Total transferred file size')))
+    P_NCOPIED=$((P_NCOPIED + $(stat_num "$sdir/stats$w" 'Number of regular files transferred')))
+  done
+}
 
 # ================================================================= BACKUP
 backup_main() {
@@ -1019,9 +1185,11 @@ Largest excluded junk:
 ${EXCL_TXT:-(none)}
 $( [ "$DRY" = 1 ] && echo 'DRY RUN: nothing will be written.' )" \
       start  "$( [ "$DRY" = 1 ] && echo 'Continue (dry run)' || echo 'START the copy' )" \
+      startp "$( [ "$DRY" = 1 ] && echo 'Continue (dry run)' || echo 'START' ) with $JOBS parallel copies (faster on lots of small files; resume-safe)" \
       browse "Browse sizes largest-first and exclude things (like WinDirStat)" \
       cancel "Quit without copying") || exit 1
     [ "$c" = yes ] && c=start
+    [ "$c" = startp ] && { c=start; PARALLEL=1; }
     case "$c" in
       start)
         if [ "$TOT_XFER" -ge "$FREE" ] && [ "$DRY" = 0 ]; then ask_msg "Not enough space" "Not enough free space on the destination ($(hr "$TOT_XFER") needed, $(hr "$FREE") free). Exclude more in the size browser or pick another drive."; continue; fi
@@ -1079,11 +1247,16 @@ $( [ "$DRY" = 1 ] && echo 'DRY RUN: nothing will be written.' )" \
     echo "== ${DRV_NAME[$i]}  ($(hr "${EST_XFER[$i]}") to copy)"
     [ "$DRY" = 1 ] || mkdir -p "$dest"
     echo "=== $(now) ${DRV_NAME[$i]} (${DRV_ROOT[$i]}) -> $dest" >>"$ERRLOG"
-    rs "${RS_BASE[@]}" --info=progress2,name1 --stats \
-      $( [ "$DRY" = 1 ] && printf -- '--dry-run' ) \
-      --exclude-from="$EXC_USED" --filter="merge $WORK/filter_$i" "${DRV_ROOT[$i]}/" "$dest/" 2>>"$ERRLOG" \
-      | python3 -c "$PY_PROGRESS" "[${DRV_NAME[$i]}]" "$offset" "$TOT_XFER" "$st"
-    rc=${PIPESTATUS[0]}
+    if [ "$PARALLEL" = 1 ] && [ "$JOBS" -gt 1 ]; then
+      copy_parallel "$i" "$dest" "$offset"; rc=$P_RC
+      printf 'Total transferred file size: %s bytes\nNumber of regular files transferred: %s\n' "$P_COPIED" "$P_NCOPIED" >"$st"
+    else
+      rs "${RS_BASE[@]}" --outbuf=N --info=progress2,name1 --stats \
+        $( [ "$DRY" = 1 ] && printf -- '--dry-run' ) \
+        --exclude-from="$EXC_USED" --filter="merge $WORK/filter_$i" "${DRV_ROOT[$i]}/" "$dest/" 2>>"$ERRLOG" \
+        | python3 -c "$PY_PROGRESS" "[${DRV_NAME[$i]}]" "$offset" "$TOT_XFER" "$st"
+      rc=${PIPESTATUS[0]}
+    fi
     case $rc in
       0) ;;
       23|24) FAILED=$((FAILED+1)); echo "(rsync exit $rc: some files could not be read; see _errors.log)";;
@@ -1314,7 +1487,7 @@ Start?" || exit 1
     echo "== ${dst#"$TGT"/}"
     if [ -d "$s" ]; then
       mkdir -p "$dst"
-      rsync "${RS_BASE[@]}" "${POL[@]}" --info=progress2,name1 --stats "$s/" "$dst/" 2>>"$LOG" \
+      rsync "${RS_BASE[@]}" "${POL[@]}" --outbuf=N --info=progress2,name1 --stats "$s/" "$dst/" 2>>"$LOG" \
         | python3 -c "$PY_PROGRESS" "[restore]" "$offset" "$TOT" "$WORK/rst_$i"
       rc=${PIPESTATUS[0]}
     else

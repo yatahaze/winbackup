@@ -190,14 +190,14 @@ assert all(i.compress_type == zipfile.ZIP_STORED for i in z.infolist())
 assert z.testzip() is None
 PY
 cmp -s "$S/Users/bob/Videos/big.mp4" "$B/Users/bob/Videos/big.mp4" && ok || fail "big file differs"
-grep -q 'overall 100%' "$T/out1" && ok || fail "progress line not rendered"
+grep -q '100%' "$T/out1" && ok || fail "progress line not rendered"
 
 echo "=== run 1c: saved preferences from run 1, auto mode, fresh destination"
 exists "$T/prefs1"
 grep -q $'^What to back up\tdocs;roaming;local;dotfiles;other;steam;steamgames;root;pdata$' "$T/prefs1" && ok || { fail "prefs did not record categories"; cat "$T/prefs1"; }
 grep -q $'^Backup folder name\t@default$' "$T/prefs1" && ok || fail "default folder name not saved as @default"
 D6=$T/dst6; mkdir -p "$D6/PoolPart.abc123"
-printf 'auto\nyes\n' >"$T/a1c"
+printf 'auto\nstartp\n' >"$T/a1c"
 WB_PREFS=$T/prefs1 bash "$SCRIPT" --src "$S" --dst "$D6" --extra "$X" --answers "$T/a1c" >"$T/out1c" 2>"$T/err1c"; rc=$?
 [ $rc = 0 ] && ok || { fail "run 1c exit $rc"; tail -20 "$T/err1c"; }
 B6=$D6/PoolPart.abc123/Backups/WinBackup_$DATE
@@ -209,6 +209,9 @@ exists "$B6/Drive_Data/Photos/p.jpg"
 absent "$B6/Drive_Data/Games/other.txt"
 exists "$B6.zip"
 grep -q '^Verify:     OK' "$B6/_summary.txt" && ok || fail "saved verify choice not applied"
+cmp -s "$B/_manifest.tsv" "$B6/_manifest.tsv" && ok || { fail "parallel copy manifest differs from single-rsync copy"; diff "$B/_manifest.tsv" "$B6/_manifest.tsv" | head; }
+grep -q 'parallel workers' "$T/out1c" && ok || fail "parallel mode not used"
+grep -q 'copied this run: 38.2MB in 30 files' "$B6/_summary.txt" && ok || { fail "parallel stats not summed"; grep 'copied this run' "$B6/_summary.txt"; }
 grep -c '(saved)' "$T/err1c" | grep -q '^[0-9]' && ok
 
 echo "=== run 2: resume (adds one file, expects only it to be copied)"
