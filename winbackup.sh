@@ -270,7 +270,8 @@ pick_part() {
   [ ${#items[@]} -gt 0 ] || { ask_msg "No partitions" "No suitable partitions found (looked for: $3).\nIs the drive plugged in? Check with: lsblk -f"; return 1; }
   local sv; sv=$(saved "part:$1")
   if [ -n "$sv" ]; then
-    local sdev=${sv%%|*} rest=${sv#*|} slabel=${rest%%|*} ssize=${rest#*|}
+    local sdev=${sv%%|*} rest=${sv#*|} slabel ssize   # (two steps: a "local" line is expanded before any of it is assigned)
+    slabel=${rest%%|*}; ssize=${rest#*|}
     while IFS='|' read -r dev fs size label mp; do
       if { [ -n "$slabel" ] && [ "$label" = "$slabel" ] && [ "$size" = "$ssize" ]; } || { [ -z "$slabel" ] && [ "$dev" = "$sdev" ] && [ "$size" = "$ssize" ]; }; then ASK_DEFAULT=$dev; break; fi
     done < <(list_parts "$3")
@@ -582,7 +583,8 @@ rs() { printf '%s rsync' "$(now)" >>"$WORK/commands.log"; printf ' %q' "$@" >>"$
 # Each worker gets its own rsync filter: the drive's explicit excludes, includes for its units and
 # their ancestors, "- ancestor/*" so siblings stay out, and "- /*".
 plan_workers() {
-  local i=$1 N=$2 est="$WORK/est_$i" root=${DRV_ROOT[$i]} u w c depth b p
+  local i=$1 N=$2 u w c depth b p est root
+  est="$WORK/est_$i"; root=${DRV_ROOT[$i]}
   awk '/^[0-9]+ / && !/\/$/ { sz=$1+0; p=substr($0, length($1)+2); n=split(p, a, "/"); k=""
          for (j=1; j<=n && j<=4; j++) { k=(j>1 ? k "/" : "") a[j]; s[k]+=sz } }
        END { for (k in s) printf "%d\t%s\n", s[k], k }' "$est" >"$WORK/psizes_$i"
@@ -700,7 +702,8 @@ PY
 
 # copy_parallel drive-index dest offset -> sets P_COPIED P_NCOPIED P_RC
 copy_parallel() {
-  local i=$1 dest=$2 offset=$3 N=$JOBS used w sdir="$WORK/par_$i"
+  local i=$1 dest=$2 offset=$3 N=$JOBS used w sdir
+  sdir="$WORK/par_$i"
   mkdir -p "$sdir"; rm -f "$sdir"/*
   used=$(plan_workers "$i" "$N")
   echo "   $used parallel workers"
@@ -1143,7 +1146,8 @@ $VHDX_NOTE}"
   }
   # size_browser drive-index: WinDirStat-style walk of what would be copied, largest first
   size_browser() {
-    local i=$1 rel="" b n t tag act mark items est="$WORK/est_$i"
+    local i=$1 rel="" b n t tag act mark items est
+    est="$WORK/est_$i"
     NOPREF=1
     while :; do
       items=()
