@@ -82,7 +82,7 @@ mk "$S/Temp/note.txt"
 mk "$S/Temp/scratch.iso"
 mk "$S/Unwanted/x"
 mk "$S/pagefile.sys"
-mk '$S/$RECYCLE.BIN/S-1/junk'
+mk "$S/\$RECYCLE.BIN/S-1/junk"
 ln -s Documents "$S/Users/bob/My Documents"   # junction-style link: must be skipped
 mkdir -p "$S/Users/bob/Videos"; head -c 40000000 /dev/urandom >"$S/Users/bob/Videos/big.mp4"
 
@@ -287,7 +287,7 @@ yes
 no
 skip
 A
-idx=0; for d in "$S"/*/; do n=$(basename "$d"); case "$n" in Windows|Users|ProgramData) continue;; esac; [ "$n" = Temp ] && break; idx=$((idx+1)); done
+idx=0; for d in "$S"/*/; do n=$(basename "$d"); case "$n" in Windows|Users|ProgramData|'$RECYCLE.BIN'|'System Volume Information') continue;; esac; [ "$n" = Temp ] && break; idx=$((idx+1)); done
 sed -i "s/^TEMPIDX$/$idx/" "$T/a4b"
 WB_PREFS=$T/prefs4b bash "$SCRIPT" --src "$S" --dst "$D5" --extra "$X" --answers "$T/a4b" >"$T/out4b" 2>"$T/err4b"; rc=$?
 [ $rc = 0 ] && ok || { fail "run 4b exit $rc"; tail -20 "$T/err4b"; }
@@ -390,23 +390,23 @@ WB_PREFS=$T/prefs4f bash "$SCRIPT" --src "$S" --dst "$D10" --answers "$T/a4f" >"
 grep -q $'^What to back up\tdocs;steam$' "$T/prefs4f" && ok || { fail "answers not saved on cancel"; cat "$T/prefs4f" 2>/dev/null; }
 grep -q $'^Steam libraries found\t' "$T/prefs4f" && ok || fail "steam choice not saved on cancel"
 
-echo "=== run 5: restore into a fresh Windows drive, mapping bob -> ryan"
-W=$T/newwin; mk "$W/Users/ryan/Desktop/existing.txt" "keep"; mk "$W/Windows/x"
+echo "=== run 5: restore into a fresh Windows drive, mapping bob -> carol"
+W=$T/newwin; mk "$W/Users/carol/Desktop/existing.txt" "keep"; mk "$W/Windows/x"
 cat >"$T/a5" <<A
 PoolPart.abc123/Backups/WinBackup_$DATE
 @all
 __same__
 __same__
-ryan
+carol
 overwrite
 yes
 A
 WB_PREFS=$T/prefs5 bash "$SCRIPT" --restore --src "$D" --dst "$W" --answers "$T/a5" >"$T/out5" 2>"$T/err5"; rc=$?
 [ $rc = 0 ] && ok || { fail "run 5 exit $rc"; tail -20 "$T/err5"; }
-exists "$W/Users/ryan/Documents/report.docx"
-exists "$W/Users/ryan/AppData/Roaming/SomeApp/settings.json"
-exists "$W/Users/ryan/.gitconfig"
-exists "$W/Users/ryan/Desktop/existing.txt"
+exists "$W/Users/carol/Documents/report.docx"
+exists "$W/Users/carol/AppData/Roaming/SomeApp/settings.json"
+exists "$W/Users/carol/.gitconfig"
+exists "$W/Users/carol/Desktop/existing.txt"
 exists "$W/Users/Alice Smith/Documents/notes [v2].txt"
 exists "$W/Users/Public/Documents/shared.txt"
 exists "$W/Program Files (x86)/Steam/steamapps/common/Game/game.exe"

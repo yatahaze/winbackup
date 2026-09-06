@@ -1,7 +1,7 @@
 # winbackup-excludes.txt -- what winbackup.sh skips. Edit freely; one rsync pattern per line.
 #
 # Patterns are matched against paths relative to the ROOT OF EACH DRIVE, e.g.
-#   Users/ryan/AppData/Local/Temp/somefile
+#   Users/alice/AppData/Local/Temp/somefile
 # Rules of thumb (these are rsync exclude patterns):
 #   dir/                 trailing slash = directories only
 #   *.tmp                no slash = matches a file/folder NAME anywhere in the tree

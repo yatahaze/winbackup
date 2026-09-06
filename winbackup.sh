@@ -1176,8 +1176,8 @@ _excluded_summary.txt for the biggest things deliberately skipped, _manifest.tsv
 every file (size <TAB> path), _excludes_used.txt for the skip rules that were applied.
 
 LAYOUT
-  This folder mirrors the Windows C: drive, so   Users\\ryan\\Documents\\x.docx   here was
-  C:\\Users\\ryan\\Documents\\x.docx   on the old install.
+  This folder mirrors the Windows C: drive, so   Users\\alice\\Documents\\x.docx   here was
+  C:\\Users\\alice\\Documents\\x.docx   on the old install.
   Drive_<label>\\...   = folders from other drives (D:, E:), same relative layout.
   Steam libraries are wherever they were (e.g. Program Files (x86)\\Steam\\steamapps).
 
