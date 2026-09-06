@@ -1,0 +1,148 @@
+# winbackup-excludes.txt -- what winbackup.sh skips. Edit freely; one rsync pattern per line.
+#
+# Patterns are matched against paths relative to the ROOT OF EACH DRIVE, e.g.
+#   Users/ryan/AppData/Local/Temp/somefile
+# Rules of thumb (these are rsync exclude patterns):
+#   dir/                 trailing slash = directories only
+#   *.tmp                no slash = matches a file/folder NAME anywhere in the tree
+#   AppData/Local/Temp/  has a slash = matches that path sequence anywhere in the tree
+#   AppData/**/Cache/    ** crosses folder boundaries: any "Cache" folder anywhere under AppData
+#   /ProgramData/x/      leading slash = anchored to the drive root
+# Lines starting with # are comments. The copy actually used by a run is saved into the
+# backup folder as _excludes_used.txt, and the biggest things skipped are listed in
+# _excluded_summary.txt so you can check nothing important was dropped.
+
+# ---- Windows profile internals (registry hives, cannot be copied while "in use" anyway) ----
+NTUSER.DAT*
+ntuser.dat*
+ntuser.ini
+UsrClass.dat*
+*.LOG1
+*.LOG2
+*.blf
+*.regtrans-ms
+Thumbs.db
+desktop.ini
+*.tmp
+~$*
+
+# ---- drive-level system junk ----
+$RECYCLE.BIN/
+$Recycle.Bin/
+System Volume Information/
+pagefile.sys
+hiberfil.sys
+swapfile.sys
+DumpStack.log.tmp
+
+# ---- temp ----
+AppData/Local/Temp/
+AppData/LocalLow/Temp/
+AppData/Local/CrashDumps/
+AppData/Local/SquirrelTemp/
+
+# ---- Windows shell caches ----
+AppData/Local/Microsoft/Windows/INetCache/
+AppData/Local/Microsoft/Windows/WebCache/
+AppData/Local/Microsoft/Windows/Temporary Internet Files/
+AppData/Local/Microsoft/Windows/Explorer/thumbcache_*
+AppData/Local/Microsoft/Windows/Explorer/iconcache_*
+AppData/Local/Microsoft/Windows/Caches/
+AppData/Local/Microsoft/Windows/WER/
+AppData/Local/Microsoft/Windows/DeliveryOptimization/
+AppData/Local/Microsoft/WindowsApps/
+AppData/Local/Microsoft/Media Player/Art Cache/
+AppData/Local/Microsoft/Office/16.0/OfficeFileCache/
+AppData/Local/Microsoft/EdgeUpdate/
+AppData/Local/Google/Update/
+AppData/Local/ConnectedDevicesPlatform/
+AppData/Local/Packages/*/LocalCache/
+AppData/Local/Packages/*/TempState/
+AppData/Local/Packages/*/AC/
+
+# ---- browser / Electron caches (Chrome, Edge, Brave, Discord, Slack, VS Code, Spotify, ...) ----
+# "**" = any depth under AppData, so a folder you made called "Cache" in Documents is NOT hit.
+AppData/**/Cache/
+AppData/**/Cache_Data/
+AppData/**/Code Cache/
+AppData/**/GPUCache/
+AppData/**/DawnCache/
+AppData/**/DawnGraphiteCache/
+AppData/**/DawnWebGPUCache/
+AppData/**/GrShaderCache/
+AppData/**/ShaderCache/
+AppData/**/Service Worker/CacheStorage/
+AppData/**/Service Worker/ScriptCache/
+AppData/**/Media Cache/
+AppData/**/component_crx_cache/
+AppData/**/optimization_guide_model_store/
+AppData/**/CachedData/
+AppData/**/CachedExtensionVSIXs/
+AppData/**/Crashpad/
+AppData/**/cache2/
+AppData/**/startupCache/
+AppData/**/jumpListCache/
+AppData/Local/Spotify/Storage/
+AppData/Local/Spotify/Data/
+AppData/Local/Spotify/Browser/
+AppData/Local/Microsoft/Teams/
+AppData/Roaming/Microsoft/Teams/
+AppData/Local/Steam/htmlcache/
+
+# ---- GPU shader caches ----
+AppData/Local/NVIDIA/
+AppData/LocalLow/NVIDIA/PerDriverVersion/
+AppData/Local/AMD/DxCache/
+AppData/Local/AMD/DxcCache/
+AppData/Local/AMD/GLCache/
+AppData/Local/AMD/VkCache/
+AppData/Local/Intel/ShaderCache/
+AppData/Local/D3DSCache/
+AppData/Local/Unity/cache/
+AppData/LocalLow/Unity/Caches/
+
+# ---- developer package caches (all re-downloadable) ----
+node_modules/
+__pycache__/
+AppData/Local/pip/cache/
+AppData/Local/npm-cache/
+AppData/Roaming/npm-cache/
+AppData/Local/Yarn/Cache/
+AppData/Local/pnpm-cache/
+AppData/Local/pnpm/store/
+AppData/Local/NuGet/v3-cache/
+AppData/Local/NuGet/plugins-cache/
+AppData/Local/JetBrains/*/caches/
+AppData/Local/JetBrains/*/index/
+AppData/Local/JetBrains/*/tmp/
+AppData/Local/Microsoft/VisualStudio/*/ComponentModelCache/
+.cache/
+.cargo/registry/
+.gradle/caches/
+.nuget/packages/
+.m2/repository/
+
+# ---- Steam (game files themselves are kept; only re-downloadable junk skipped) ----
+steamapps/downloading/
+steamapps/temp/
+steamapps/shadercache/
+steamapps/workshop/temp/
+steamapps/workshop/downloads/
+
+# ---- ProgramData (only used if you tick the ProgramData category) ----
+ProgramData/Package Cache/
+ProgramData/Microsoft/Windows Defender/
+ProgramData/Microsoft/Search/
+ProgramData/Microsoft/Windows/WER/
+ProgramData/Microsoft/Diagnosis/
+ProgramData/Microsoft/Network/Downloader/
+ProgramData/Microsoft/Windows/DeliveryOptimization/
+ProgramData/NVIDIA Corporation/Downloader/
+ProgramData/NVIDIA Corporation/NV_Cache/
+ProgramData/USOShared/
+
+# ---- optional: uncomment if you want smaller backups ----
+# *.ost                                 Outlook offline mailbox copies (re-synced from the server)
+# AppData/Local/Programs/               per-user installed apps (Discord, VS Code, Python...) - binaries only
+# AppData/Local/Docker/                 Docker Desktop disk images (can be many GB)
+# .vscode/extensions/                   VS Code extensions (reinstall from the extension list)
