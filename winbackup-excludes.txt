@@ -152,7 +152,7 @@ ProgramData/Backblaze/
 ProgramData/NVIDIA Corporation/Installer2/
 ProgramData/Topaz Labs LLC/
 
-# ---- Blizzard / Battle.net game installs (re-downloadable through the launcher) ----
+# ---- Battle.net launcher titles: Blizzard + Activision game installs (re-downloadable) ----
 # Saves and settings are NOT here: they live in Documents\<Game>, Saved Games\<Game>,
 # AppData\Roaming\Battle.net and AppData\Local\Blizzard Entertainment, which the profile copy keeps.
 # "/*/<Game>/" = a game folder directly inside ANY top-level folder (Program Files (x86), Apps, Games...),
@@ -187,6 +187,18 @@ ProgramData/Topaz Labs LLC/
 /*/*/Warcraft I & II Remastered/
 /*/Call of Duty*/
 /*/*/Call of Duty*/
+/*/Warcraft Rumble/
+/*/*/Warcraft Rumble/
+/*/Warcraft I*/
+/*/*/Warcraft I*/
+/*/Warcraft II*/
+/*/*/Warcraft II*/
+/*/Warcraft Remastered/
+/*/*/Warcraft Remastered/
+/*/Crash Bandicoot*/
+/*/*/Crash Bandicoot*/
+/*/Tony Hawk*/
+/*/*/Tony Hawk*/
 # World of Warcraft: drop the ~100 GB of game data but keep _retail_\WTF (settings, macros) and
 # Interface\AddOns. To drop the whole folder instead, replace these with:  /*/World of Warcraft/
 /*/World of Warcraft/_*_/Data/
