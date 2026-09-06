@@ -205,6 +205,8 @@ ProgramData/Topaz Labs LLC/
 /*/World of Warcraft/_*_/Cache/
 /*/*/World of Warcraft/_*_/Data/
 /*/*/World of Warcraft/_*_/Cache/
+# Oculus/Meta app + its game library (re-downloadable from the Meta store)
+/Program Files/Oculus/
 ProgramData/Battle.net/
 ProgramData/Blizzard Entertainment/
 

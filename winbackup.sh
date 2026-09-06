@@ -504,6 +504,9 @@ steamapps/temp/
 X
 }
 
+# Everything the user leaves unticked is collected here and shown loudly on the confirm screen.
+not_backed_up() { printf '  %s\n' "$1" >>"$WORK/not_backed_up.txt"; }
+
 # ---------------------------------------------------------------- drives / jobs model
 # DRV_ROOT[i]   directory the drive is readable at (rsync source root)
 # DRV_NAME[i]   "C" for the Windows drive, otherwise Drive_<label>
@@ -560,7 +563,7 @@ backup_main() {
       fresh  "Ignore them and start from the defaults") || exit 1
     PREFS_MODE=$pm; forget "Saved preferences"
   fi
-  local SRC SRC_DEV="" DST_DEV="" DSTROOT NAME RESUMED=0
+  local SRC SRC_DEV="" DST_DEV="" DSTROOT NAME RESUMED=0 k
   DST=""
 
   # ---- 1. source drive ----
@@ -668,6 +671,7 @@ Choose No to create a new folder with the time appended instead."; then
     if [ ${#items[@]} -gt 0 ]; then
       local out; out=$(ask_check "User profiles" "Which user profiles to back up? (Space toggles, Enter confirms)" "${items[@]}") || exit 1
       [ -n "$out" ] && mapfile -t USERS <<<"$out"
+      for (( k=0; k<${#items[@]}; k+=3 )); do grep -qxF -- "${items[$k]}" <<<"$out" || not_backed_up "User profile: Users\\${items[$k]}  (everything in it)"; done
     fi
   fi
 
@@ -681,11 +685,15 @@ hives, Windows itself). Untick only what you are sure you do not want. Space tog
     dotfiles "Hidden home files (.ssh, .gitconfig, .config, .vscode, ...)" ON \
     other    "Everything else in the profile (OneDrive, misc folders and files)" ON \
     steam    "Steam saves + settings (userdata, config) from every Steam library on this drive" ON \
-    steamgames "Installed Steam games (steamapps\\common; often hundreds of GB, re-downloadable)" ON \
+    steamgames "Installed Steam games (steamapps\\common; often hundreds of GB, re-downloadable)" OFF \
     root     "Everything else on C: (Program Files, app/game folders, Windows.old...; never \\Windows)" ON \
     pdata    "ProgramData (shared app data)" ON \
     ) || exit 1
   has() { grep -qx "$1" <<<"$CATS"; }
+  local -A CAT_LABEL=([docs]="Desktop/Documents/Downloads/Pictures/Videos/Music/Saved Games" [roaming]="AppData\\Roaming" [local]="AppData\\Local + LocalLow"
+    [dotfiles]="hidden home files (.ssh, .config...)" [other]="everything else in the profiles" [steam]="Steam saves + settings"
+    [steamgames]="installed Steam games" [root]="all other folders on C:" [pdata]="ProgramData")
+  local ck; for ck in docs roaming local dotfiles other steam steamgames root pdata; do has "$ck" || not_backed_up "Category: ${CAT_LABEL[$ck]}"; done
   local DOCS=(Desktop Documents Downloads Pictures Videos Music "Saved Games" Favorites Contacts Links Searches "3D Objects")
   for u in "${USERS[@]}"; do
     local P="$SRC/Users/$u" R="Users/$u"
@@ -735,6 +743,7 @@ hives, Windows itself). Untick only what you are sure you do not want. Space tog
     if [ ${#S_DRV[@]} -gt 0 ]; then
       items=()
       for i in "${!S_DRV[@]}"; do items+=("$i" "${DRV_NAME[${S_DRV[$i]}]}:\\${S_REL[$i]//\//\\}" ON); done
+      for i in "${!S_DRV[@]}"; do grep -qx -- "$i" <<<"$picked" || not_backed_up "Steam library: ${DRV_NAME[${S_DRV[$i]}]}:\\${S_REL[$i]//\//\\}"; done
       local parts=() what="" nots=(); has steam && { parts+=(userdata config); what="userdata + config (saves/settings)"; }
       has steamgames && { parts+=(steamapps); what="${what:+$what, }steamapps (installed games)"; }
       has steamgames || nots+=(steamapps); has steam || nots+=(userdata config)
@@ -764,6 +773,7 @@ hives, Windows itself). Untick only what you are sure you do not want. Space tog
     if [ ${#items[@]} -gt 0 ]; then
       local out; out=$(ask_check "Root folders on C:" "All other folders on the Windows drive (Users and ProgramData are handled by their own categories; \\Windows is never copied). Untick anything you do not want:" "${items[@]}") || exit 1
       while IFS= read -r n; do [ -n "$n" ] && want 0 "$n"; done <<<"$out"
+      for (( k=0; k<${#items[@]}; k+=3 )); do grep -qxF -- "${items[$k]}" <<<"$out" || not_backed_up "Root folder: C:\\${items[$k]}"; done
     fi
   fi
   has pdata && [ -d "$SRC/ProgramData" ] && want 0 ProgramData
@@ -787,6 +797,7 @@ hives, Windows itself). Untick only what you are sure you do not want. Space tog
     done
     local out; out=$(ask_check "Folders on other drives" "Other NTFS drives were found; everything on them is ticked (saved under Drive_<label>\\ in the backup). Untick what you do not want. Steam libraries in these folders are covered either way." "${items[@]}") || exit 1
     while IFS= read -r i; do [ -n "$i" ] && want "${O_DRV[$i]}" "${O_NAME[$i]}"; done <<<"$out"
+    for i in "${!O_DRV[@]}"; do grep -qx -- "$i" <<<"$out" || not_backed_up "Other drive folder: ${DRV_NAME[${O_DRV[$i]}]}:\\${O_NAME[$i]}"; done
   fi
 
   # ---- 8b. optional drill-down: go through a folder item by item (e.g. C:\Temp) ----
@@ -823,6 +834,7 @@ Leave everything unticked to copy those folders whole." "${items[@]}") || exit 1
         [ -e "$c" ] || continue; cn=$(basename "$c")
         grep -qxF -- "$cn" <<<"$keep" && continue
         if [ -d "$c" ]; then xcl "${R_DRV[$i]}" "$(esc "${R_REL[$i]}/$cn")/"; else xcl "${R_DRV[$i]}" "$(esc "${R_REL[$i]}/$cn")"; fi
+        not_backed_up "Item: ${DRV_NAME[${R_DRV[$i]}]}:\\${R_REL[$i]//\//\\}\\$cn"
       done
     done <<<"$out"
   fi
@@ -920,8 +932,19 @@ Nothing will be copied. Diagnostics: ${DIAG:-$WORK}"
     BIG_TXT=$(awk -F'\t' '$1==2' "$WORK/sizes.tsv" | sort -t$'\t' -k2,2nr | head -10 | while IFS=$'\t' read -r _ b n; do printf '%9s  %s\n' "$(hr "$b")" "$n"; done)
   }
   build_summary() {
-    local bx=""; [ -s "$BROWSE_XCL" ] && bx="
-Excluded in the size browser: $(grep -c . "$BROWSE_XCL") item(s)"
+    local bx="" nb=""
+    [ -s "$WORK/not_backed_up.txt" ] && nb=$(cat "$WORK/not_backed_up.txt")
+    [ -s "$BROWSE_XCL" ] && bx=$(awk -F'\t' '{ p=$2; gsub("/", "\\", p); printf "  Size browser: %s:\\%s\n", $1, p }' "$BROWSE_XCL")
+    local danger=""
+    [ -n "$nb$bx" ] && danger="
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+!!!  NOT BACKED UP  (you left these unticked or excluded them)   !!!
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+${nb}${nb:+
+}${bx}
+(Junk from winbackup-excludes.txt is separate; see the list at the bottom.)
+"
+    bx=""
     SUMMARY="Source:        ${SRC_DEV:-$SRC} $( [ -n "$SRC_DEV" ] && printf '"%s"' "$(part_label "$SRC_DEV")" ) (read-only)
 Destination:   ${DST_DEV:-} $DST$( [ "$RESUMED" = 1 ] && echo '   [RESUMING]' )
 Users:         ${USERS[*]:-(none)}
@@ -932,7 +955,7 @@ Already there:      $(hr $((TOT_SEL - TOT_XFER)))
 To copy now:        $(hr "$TOT_XFER")  ($TOT_N files)
 Excluded junk:      $(hr "$EXCL_TOTAL")  (full list: _excluded_summary.txt)
 Free on dest:       $(hr "$FREE")   $( [ "$TOT_XFER" -ge "$FREE" ] && echo '<-- NOT ENOUGH SPACE' )
-
+$danger
 Biggest folders in the copy (full list: _size_breakdown.txt):
 ${BIG_TXT:-(none)}${VHDX_NOTE:+
 
@@ -1042,6 +1065,8 @@ $( [ "$DRY" = 1 ] && echo 'DRY RUN: nothing will be written.' )" \
     cp "$EXC_USED" "$DST/_excludes_used.txt"
     [ -f "$WORK/excluded_summary.txt" ] && cp "$WORK/excluded_summary.txt" "$DST/_excluded_summary.txt"
     [ -f "$WORK/size_breakdown.txt" ] && cp "$WORK/size_breakdown.txt" "$DST/_size_breakdown.txt"
+    { echo "Deliberately NOT backed up (unticked / excluded by hand):"; cat "$WORK/not_backed_up.txt" 2>/dev/null
+      awk -F'\t' '{ p=$2; gsub("/", "\\", p); printf "  Size browser: %s:\\%s\n", $1, p }' "$BROWSE_XCL" 2>/dev/null; } >"$DST/_not_backed_up.txt"
     [ "$RESUMED" = 1 ] || printf 'Started: %s\n' "$T_START" >"$DST/_summary.txt"
   fi
   clear 2>/dev/null

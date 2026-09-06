@@ -72,6 +72,8 @@ mk "$S/Apps/World of Warcraft/_retail_/Interface/AddOns/Foo/Foo.lua"
 mk "$S/Apps/Other Game/keep.exe"
 mk "$S/Games/Blizzard/StarCraft II/SC2.exe"
 mk "$S/Program Files (x86)/Diablo IV/Diablo IV.exe"
+mk "$S/Program Files/Oculus/Software/game/x"
+mk "$S/Program Files/KeepMe/x"
 mk "$S/Users/bob/Documents/Diablo IV/save.dat" "d4 save"
 mk "$S/Users/bob/Saved Games/Diablo II Resurrected/char.d2s" "d2r save"
 mk "$S/Temp/project-a/work.txt"
@@ -176,6 +178,8 @@ grep -q 'Users/bob/Documents/report.docx' "$B/_manifest.tsv" && ok || fail "mani
 grep -q '^Verify:     OK' "$B/_summary.txt" && ok || { fail "verify not OK"; cat "$B/_summary.txt"; cat "$B/_verify.log"; }
 [ -s "$B/_errors.log" ] && { grep -q '^rsync:' "$B/_errors.log" && fail "rsync errors logged: $(grep '^rsync:' "$B/_errors.log" | head -3)"; }
 grep -q 'AppData/Local/Temp' "$B/_excluded_summary.txt" && ok || fail "excluded summary lacks Temp"
+grep -q 'Root folder: C:\\Unwanted' "$B/_not_backed_up.txt" && ok || { fail "_not_backed_up lacks Unwanted"; cat "$B/_not_backed_up.txt"; }
+grep -q 'Other drive folder: Drive_Data:\\Games' "$B/_not_backed_up.txt" && ok || fail "_not_backed_up lacks Drive_Data Games"
 grep -q 'node_modules' "$B/_excluded_summary.txt" && ok || fail "excluded summary lacks node_modules"
 exists "$B.zip"
 python3 - "$B.zip" <<'PY' && ok || fail "zip content"
@@ -292,6 +296,8 @@ exists "$D5/WinBackup_$DATE/Unwanted/x"
 exists "$D5/WinBackup_$DATE/Program Files (x86)/Other/x"
 absent "$D5/WinBackup_$DATE/Program Files (x86)/Warcraft III"
 absent "$D5/WinBackup_$DATE/Program Files (x86)/Diablo IV"
+absent "$D5/WinBackup_$DATE/Program Files/Oculus"
+exists "$D5/WinBackup_$DATE/Program Files/KeepMe/x"
 absent "$D5/WinBackup_$DATE/Games/Blizzard/StarCraft II"
 exists "$D5/WinBackup_$DATE/Users/bob/Documents/Diablo IV/save.dat"
 exists "$D5/WinBackup_$DATE/Users/bob/Saved Games/Diablo II Resurrected/char.d2s"
@@ -372,7 +378,9 @@ WB_PREFS=$T/prefs4d bash "$SCRIPT" --src "$S" --dst "$D9" --answers "$T/a4e" >"$
 [ $rc = 0 ] && ok || { fail "run 4e exit $rc"; tail -20 "$T/err4e"; }
 absent "$D9/WinBackup_$DATE/Apps/World of Warcraft"
 exists "$D9/WinBackup_$DATE/Apps/Other Game/keep.exe"
-grep -q 'size-browser exclusions: 1' "$D9/WinBackup_$DATE/_summary.txt" && ok || fail "summary does not mention browser exclusion"
+grep -q 'size-browser exclusions: 1' "$D9/WinBackup_$DATE/_summary.txt" && ok
+grep -q 'Size browser: C:\\Apps\\World of Warcraft' "$D9/WinBackup_$DATE/_not_backed_up.txt" && ok || { fail "_not_backed_up lacks browser exclusion"; cat "$D9/WinBackup_$DATE/_not_backed_up.txt"; }
+grep -q 'Category: installed Steam games' "$D9/WinBackup_$DATE/_not_backed_up.txt" && ok || fail "_not_backed_up lacks steamgames category" || fail "summary does not mention browser exclusion"
 
 echo "=== run 4f: quitting at the confirm screen still saves the answers"
 D10=$T/dst10; mkdir -p "$D10"
