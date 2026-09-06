@@ -149,6 +149,15 @@ ProgramData/NVIDIA Corporation/Downloader/
 ProgramData/NVIDIA Corporation/NV_Cache/
 ProgramData/USOShared/
 
+# ---- big game installs under C:\Apps that are not wanted (saves are in Saved Games / Documents) ----
+# leading "/" anchors to the drive root; [Aa] matches either capitalisation
+/[Aa]pps/Diablo II/
+/[Aa]pps/Diablo IV/
+# World of Warcraft: drop the ~100 GB of game data but keep _retail_\WTF (settings, macros) and
+# Interface\AddOns. To drop the whole folder instead, replace these two lines with:  /[Aa]pps/World of Warcraft/
+/[Aa]pps/World of Warcraft/_*_/Data/
+/[Aa]pps/World of Warcraft/_*_/Cache/
+
 # ---- optional: uncomment if you want smaller backups ----
 # *.ost                                 Outlook offline mailbox copies (re-synced from the server)
 # AppData/Local/Programs/               per-user installed apps (Discord, VS Code, Python...) - binaries only
