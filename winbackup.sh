@@ -28,6 +28,7 @@
 set -u
 shopt -s nullglob
 umask 022
+cd / || exit 1   # never keep a cwd on a drive we may unmount; rsync aborts if getcwd() fails
 VERSION="2.0"
 
 # ---------------------------------------------------------------- args
@@ -706,7 +707,7 @@ hives, Windows itself). Untick only what you are sure you do not want. Space tog
     while IFS= read -r v; do
       vsz=$(stat -c %s "$v" 2>/dev/null || echo 0)
       VHDX_TXT+="  $(hr "$vsz")  C:\\${v#"$SRC"/}"$'\n'
-    done < <(find "$SRC/Users/$u/AppData/Local" -maxdepth 4 -iname '*.vhdx' 2>/dev/null)
+    done < <(find "$SRC/Users/$u/AppData/Local" -maxdepth 4 -iname '*.vhdx' -not -path '*/Temp/*' 2>/dev/null)
   done
   VHDX_TXT=${VHDX_TXT//\//\\}
   local VHDX_NOTE=""
@@ -754,7 +755,7 @@ hives, Windows itself). Untick only what you are sure you do not want. Space tog
     items=()
     for d in "$SRC"/*/; do
       n=$(basename "$d")
-      case "$n" in Windows|Users|ProgramData|'$Recycle.Bin'|'$RECYCLE.BIN'|'System Volume Information'|PerfLogs|Recovery|'$WinREAgent'|'Documents and Settings'|found.000) continue;; esac
+      case "$n" in Windows|Users|ProgramData|'$Recycle.Bin'|'$RECYCLE.BIN'|'System Volume Information'|PerfLogs|Recovery|'$WinREAgent'|'$SysReset'|'$GetCurrent'|'Windows.~BT'|'Windows.~WS'|ESD|Boot|Config.Msi|MSOCache|OneDriveTemp|'Documents and Settings'|found.000) continue;; esac
       items+=("$n" "" ON)
     done
     if [ ${#items[@]} -gt 0 ]; then
