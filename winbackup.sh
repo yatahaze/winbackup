@@ -75,6 +75,8 @@ STAMP_DATE=$(date +%Y-%m-%d)
 cleanup() {
   local rc=$?
   sync
+  # whatever was answered so far is kept, even after a cancel or Ctrl-C
+  [ "$MODE" = backup ] && save_prefs
   if [ -n "$DIAG" ]; then
     cp "$WORK"/mount.log "$WORK"/commands.log "$WORK"/errors.log "$WORK"/filter_* "$WORK"/stats_* "$WORK"/size_breakdown.txt "$WORK"/excluded_summary.txt "$DIAG"/ 2>/dev/null
     for f in "$WORK"/est_*; do [ -f "$f" ] && { grep -v '^\[sender\] \(hiding\|showing\)' "$f" | head -200 >"$DIAG/$(basename "$f").txt"; }; done
@@ -123,6 +125,7 @@ saved() { [ -z "$NOPREF" ] && [ "$PREFS_MODE" != fresh ] && [ -n "${PREF[$1]+x}"
 auto_ok() { [ -z "$NOPREF" ] && [ "$PREFS_MODE" = auto ] && [ "$1" != "Confirm" ] && [ -n "${PREF[$1]+x}" ]; }
 save_prefs() {
   [ -s "$WORK/prefs.new" ] || return 0
+  [ "$PREFS_MODE" = fresh ] || [ ! -f "$PREFS_FILE" ] || { local k v; while IFS=$'\t' read -r k v; do [[ -n "$k" && "$k" != \#* ]] && printf '%s\t%s\n' "$k" "$v"; done <"$PREFS_FILE" | cat - "$WORK/prefs.new" >"$WORK/prefs.merged" && mv "$WORK/prefs.merged" "$WORK/prefs.new"; }
   local -A n=(); local k v
   while IFS=$'\t' read -r k v; do [ -n "$k" ] && n[$k]=$v; done <"$WORK/prefs.new"      # last answer wins
   [ -f "$WORK/prefs.forget" ] && while read -r k; do unset "n[$k]"; done <"$WORK/prefs.forget"

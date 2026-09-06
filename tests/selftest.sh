@@ -364,6 +364,14 @@ absent "$D9/WinBackup_$DATE/Apps/World of Warcraft"
 exists "$D9/WinBackup_$DATE/Apps/Other Game/keep.exe"
 grep -q 'size-browser exclusions: 1' "$D9/WinBackup_$DATE/_summary.txt" && ok || fail "summary does not mention browser exclusion"
 
+echo "=== run 4f: quitting at the confirm screen still saves the answers"
+D10=$T/dst10; mkdir -p "$D10"
+printf '/\n@default\nbob\ndocs;steam\n@all\ncancel\n' >"$T/a4f"
+WB_PREFS=$T/prefs4f bash "$SCRIPT" --src "$S" --dst "$D10" --answers "$T/a4f" >"$T/out4f" 2>"$T/err4f"; rc=$?
+[ $rc = 1 ] && ok || fail "run 4f should exit 1 on cancel (got $rc)"
+grep -q $'^What to back up\tdocs;steam$' "$T/prefs4f" && ok || { fail "answers not saved on cancel"; cat "$T/prefs4f" 2>/dev/null; }
+grep -q $'^Steam libraries found\t' "$T/prefs4f" && ok || fail "steam choice not saved on cancel"
+
 echo "=== run 5: restore into a fresh Windows drive, mapping bob -> ryan"
 W=$T/newwin; mk "$W/Users/ryan/Desktop/existing.txt" "keep"; mk "$W/Windows/x"
 cat >"$T/a5" <<A
