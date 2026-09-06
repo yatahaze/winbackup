@@ -60,6 +60,7 @@ EXC_FILE="$SCRIPT_DIR/winbackup-excludes.txt"
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/winbackup.XXXXXX")
 MNT=/mnt/winbackup
 OUR_MOUNTS=()      # mountpoints we created: unmounted at exit
+OUR_DEVS=()        # the device behind each of those, so we can hand it back to the desktop
 REMOUNT_RW=()      # desktop mounts we flipped read-only: flipped back at exit
 STAMP_DATE=$(date +%Y-%m-%d)
 
@@ -72,7 +73,14 @@ cleanup() {
     umount "${OUR_MOUNTS[$i]}" 2>/dev/null || umount -l "${OUR_MOUNTS[$i]}" 2>/dev/null
   done
   for i in "${REMOUNT_RW[@]}"; do mount -o remount,rw "$i" 2>/dev/null; done
-  [ ${#OUR_MOUNTS[@]} -gt 0 ] && echo "Unmounted the ${#OUR_MOUNTS[@]} drive(s) this tool mounted. Drives the desktop had open are left as they were."
+  # Hand the drives we mounted back to the desktop (so they reappear in the file manager).
+  # udisksctl must run as the desktop user, not root, for the mount to land under /media/<user>.
+  local d back=0
+  for d in "${OUR_DEVS[@]}"; do
+    [ -n "$d" ] && [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != root ] || continue
+    sudo -u "$SUDO_USER" udisksctl mount -b "$d" >/dev/null 2>&1 && back=$((back+1))
+  done
+  [ ${#OUR_MOUNTS[@]} -gt 0 ] && echo "Unmounted the ${#OUR_MOUNTS[@]} drive(s) this tool mounted; $back re-mounted for the desktop. Drives the desktop had open were left alone."
   rm -rf "$WORK"
   exit $rc
 }
@@ -213,21 +221,21 @@ mount_ro() {   # dev mountpoint [quiet]  (quiet = no interactive fallbacks; used
   fi
   mkdir -p "$mp"
   if [ "$fs" != ntfs ]; then
-    try_mount "$dev" "$mp" "" ro && { OUR_MOUNTS+=("$mp"); echo "$mp"; return 0; }
+    try_mount "$dev" "$mp" "" ro && { OUR_MOUNTS+=("$mp"); OUR_DEVS+=("$dev"); echo "$mp"; return 0; }
     return 1
   fi
   local a
   for a in "ntfs-3g|ro" "ntfs3|ro" "ntfs3|ro,force"; do
-    try_mount "$dev" "$mp" "${a%%|*}" "${a#*|}" && { OUR_MOUNTS+=("$mp"); echo "$mp"; return 0; }
+    try_mount "$dev" "$mp" "${a%%|*}" "${a#*|}" && { OUR_MOUNTS+=("$mp"); OUR_DEVS+=("$dev"); echo "$mp"; return 0; }
   done
   [ -n "$quiet" ] && return 1
   if ask_yesno "Source mount failed" "$(printf 'Could not mount %s read-only.\n\n%s\n\nLast resort 1: run "ntfsfix -d" on it. This clears the NTFS dirty flag and\nresets the journal (a tiny metadata write; no file data is touched). Try it?' "$dev" "$(mount_log_tail)")"; then
     ntfsfix -d "$dev" >>"$WORK/mount.log" 2>&1
-    try_mount "$dev" "$mp" ntfs-3g ro && { OUR_MOUNTS+=("$mp"); echo "$mp"; return 0; }
+    try_mount "$dev" "$mp" ntfs-3g ro && { OUR_MOUNTS+=("$mp"); OUR_DEVS+=("$dev"); echo "$mp"; return 0; }
   fi
   if ask_yesno "Source mount failed" "$(printf 'Still could not mount %s.\n\nLast resort 2: mount once with remove_hiberfile (deletes hiberfil.sys, i.e. the\nsaved hibernation state) and then remount read-only. Try it?' "$dev")"; then
     try_mount "$dev" "$mp" ntfs-3g remove_hiberfile && umount "$mp" 2>>"$WORK/mount.log"
-    try_mount "$dev" "$mp" ntfs-3g ro && { OUR_MOUNTS+=("$mp"); echo "$mp"; return 0; }
+    try_mount "$dev" "$mp" ntfs-3g ro && { OUR_MOUNTS+=("$mp"); OUR_DEVS+=("$dev"); echo "$mp"; return 0; }
   fi
   return 1
 }
@@ -243,7 +251,7 @@ mount_rw() {
   fi
   mkdir -p "$mp"
   if [ "$fs" != ntfs ]; then
-    try_mount "$dev" "$mp" "" rw && { OUR_MOUNTS+=("$mp"); echo "$mp"; return 0; }
+    try_mount "$dev" "$mp" "" rw && { OUR_MOUNTS+=("$mp"); OUR_DEVS+=("$dev"); echo "$mp"; return 0; }
     return 1
   fi
   if ! try_mount "$dev" "$mp" ntfs-3g rw; then
@@ -255,7 +263,7 @@ mount_rw() {
       try_mount "$dev" "$mp" ntfs-3g rw || try_mount "$dev" "$mp" ntfs3 rw,force || return 1
     fi
   fi
-  OUR_MOUNTS+=("$mp"); echo "$mp"
+  OUR_MOUNTS+=("$mp"); OUR_DEVS+=("$dev"); echo "$mp"
 }
 
 # resolve_ci base relpath -> base/relpath with each existing component matched case-insensitively
