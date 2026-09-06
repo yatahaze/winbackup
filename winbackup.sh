@@ -427,13 +427,15 @@ def status():
     ov = min(offset + done, total) if total else 0
     pct = int(100 * ov / total) if total else 100
     now = time.time(); el = now - t0
-    fhist.append((now, nfiles)); 
-    while len(fhist) > 2 and now - fhist[0][0] > 10: fhist.pop(0)
-    fps = (nfiles - fhist[0][1]) / (now - fhist[0][0]) if now - fhist[0][0] > 1 else 0
-    # two ETAs: by bytes (good for big files) and by file count (good for small-file phases); show the longer
+    fhist.append((now, nfiles, done))
+    while len(fhist) > 2 and now - fhist[0][0] > 120: fhist.pop(0)   # rolling 2-minute window
+    span = now - fhist[0][0]
+    fps = (nfiles - fhist[0][1]) / span if span > 1 else 0
+    bps = (done - fhist[0][2]) / span if span > 1 else 0
+    # two ETAs from the recent rates: by bytes (big files) and by file count (small-file phases); show the longer
     etas = []
-    if done > 0 and el > 2 and total: etas.append((total - ov) / (done / el))
-    if ftotal and el > 5 and nfiles > 0: etas.append(max(0, ftotal - foffset - nfiles) / (nfiles / el))
+    if bps > 0 and span > 10 and total: etas.append((total - ov) / bps)
+    if ftotal and span > 10 and fps > 0: etas.append(max(0, ftotal - foffset - nfiles) / fps)
     eta = f'ETA {fmt_eta(max(etas))}' if etas else ''
     fpart = f'files {foffset + nfiles}/{ftotal} ({fps:.0f}/s)' if ftotal else f'files:{nfiles} ({fps:.0f}/s)'
     w = cols()
@@ -731,12 +733,14 @@ while True:
     ov = min(offset + done, total) if total else 0
     pct = int(100 * ov / total) if total else 100
     now = time.time(); el = now - t0; rate = done / el if el > 0 else 0
-    fhist.append((now, nfiles))
-    while len(fhist) > 2 and now - fhist[0][0] > 10: fhist.pop(0)
-    fps = (nfiles - fhist[0][1]) / (now - fhist[0][0]) if now - fhist[0][0] > 1 else 0
+    fhist.append((now, nfiles, done))
+    while len(fhist) > 2 and now - fhist[0][0] > 120: fhist.pop(0)
+    span = now - fhist[0][0]
+    fps = (nfiles - fhist[0][1]) / span if span > 1 else 0
+    bps = (done - fhist[0][2]) / span if span > 1 else 0
     etas = []
-    if rate > 0 and el > 2 and total: etas.append((total - ov) / rate)
-    if ftotal and el > 5 and nfiles > 0: etas.append(max(0, ftotal - foffset - nfiles) / (nfiles / el))
+    if bps > 0 and span > 10 and total: etas.append((total - ov) / bps)
+    if ftotal and span > 10 and fps > 0: etas.append(max(0, ftotal - foffset - nfiles) / fps)
     eta = f'ETA {int(max(etas)//3600)}:{int(max(etas)%3600//60):02d}:{int(max(etas)%60):02d}' if etas else ''
     fpart = f'files {foffset + nfiles}/{ftotal} ({fps:.0f}/s)' if ftotal else f'files:{nfiles} ({fps:.0f}/s)'
     l1 = f'{label} {pct:3d}%  {hr(ov)} / {hr(total)}  {hr(rate)}/s  {fpart}  {eta}  ({n} workers)'
@@ -764,7 +768,7 @@ copy_parallel() {
       echo "${PIPESTATUS[0]}" >"$sdir/rc$w" ) &
     pids+=($!)
   done
-  python3 -c "$PY_MULTI" "[${DRV_NAME[$i]}]" "$sdir" "$offset" "$TOT_XFER" "$TOT_N" "$foffset"
+  python3 -c "$PY_MULTI" "[${DRV_NAME[$i]}]" "$sdir" "$offset" "$TOT_XFER" "$RS_N" "$foffset"
   wait "${pids[@]}" 2>/dev/null
   P_RC=0; P_COPIED=0; P_NCOPIED=0
   for (( w=0; w<N; w++ )); do
@@ -1528,7 +1532,9 @@ $( [ "$DRY" = 1 ] && echo 'DRY RUN: nothing will be written.' )" \
   clear 2>/dev/null
   echo "winbackup $VERSION  $( [ "$DRY" = 1 ] && echo '*** DRY RUN ***' )"
   echo "-> $DST"; echo
-  local offset=0 foffset=0 FAILED=0 rc COPIED=0 NCOPIED=0
+  local offset=0 foffset=0 FAILED=0 rc COPIED=0 NCOPIED=0 RS_N=$TOT_N
+  [ "$PACK" = 1 ] && [ -s "$WORK/packs_all.txt" ] && RS_N=$(( TOT_N - $(awk -F'\t' '$5!="done"{s+=$1} END{print s+0}' "$WORK/packs_all.txt") ))
+  [ "$RS_N" -lt 0 ] && RS_N=0
   for i in "${!DRV_ROOT[@]}"; do
     [ -n "${DRV_WANT[$i]}" ] || continue
     local dest="$DST/${DRV_PREFIX[$i]}" st="$WORK/stats_$i"
@@ -1543,7 +1549,7 @@ $( [ "$DRY" = 1 ] && echo 'DRY RUN: nothing will be written.' )" \
       rs "${RS_BASE[@]}" --outbuf=N --info=progress2,name1 --stats \
         $( [ "$DRY" = 1 ] && printf -- '--dry-run' ) \
         --exclude-from="$EXC_USED" "${PACKX_OPT[@]}" --filter="merge $WORK/filter_$i" "${DRV_ROOT[$i]}/" "$dest/" 2>>"$ERRLOG" \
-        | python3 -c "$PY_PROGRESS" "[${DRV_NAME[$i]}]" "$offset" "$TOT_XFER" "$st" "$TOT_N" "$foffset"
+        | python3 -c "$PY_PROGRESS" "[${DRV_NAME[$i]}]" "$offset" "$TOT_XFER" "$st" "$RS_N" "$foffset"
       rc=${PIPESTATUS[0]}
     fi
     case $rc in
