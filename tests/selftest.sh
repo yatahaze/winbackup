@@ -106,7 +106,7 @@ yes
 yes
 quick
 A
-bash "$SCRIPT" --src "$S" --dst "$D" --extra "$X" --answers "$T/a1" >"$T/out1" 2>"$T/err1"; rc=$?
+WB_PREFS=$T/prefs1 bash "$SCRIPT" --src "$S" --dst "$D" --extra "$X" --answers "$T/a1" >"$T/out1" 2>"$T/err1"; rc=$?
 [ $rc = 0 ] && ok || { fail "run 1 exit $rc"; tail -20 "$T/err1"; }
 B=$D/PoolPart.abc123/Backups/WinBackup_$DATE
 exists "$B"
@@ -183,6 +183,25 @@ PY
 cmp -s "$S/Users/bob/Videos/big.mp4" "$B/Users/bob/Videos/big.mp4" && ok || fail "big file differs"
 grep -q 'overall 100%' "$T/out1" && ok || fail "progress line not rendered"
 
+echo "=== run 1c: saved preferences from run 1, auto mode, fresh destination"
+exists "$T/prefs1"
+grep -q $'^What to back up\tdocs;roaming;local;dotfiles;other;steam;steamgames;root;pdata$' "$T/prefs1" && ok || { fail "prefs did not record categories"; cat "$T/prefs1"; }
+grep -q $'^Backup folder name\t@default$' "$T/prefs1" && ok || fail "default folder name not saved as @default"
+D6=$T/dst6; mkdir -p "$D6/PoolPart.abc123"
+printf 'auto\nyes\n' >"$T/a1c"
+WB_PREFS=$T/prefs1 bash "$SCRIPT" --src "$S" --dst "$D6" --extra "$X" --answers "$T/a1c" >"$T/out1c" 2>"$T/err1c"; rc=$?
+[ $rc = 0 ] && ok || { fail "run 1c exit $rc"; tail -20 "$T/err1c"; }
+B6=$D6/PoolPart.abc123/Backups/WinBackup_$DATE
+exists "$B6/Users/bob/Documents/report.docx"
+exists "$B6/Users/Alice Smith/Documents/notes [v2].txt"
+exists "$B6/Custom/thing.txt"
+absent "$B6/Unwanted"
+exists "$B6/Drive_Data/Photos/p.jpg"
+absent "$B6/Drive_Data/Games/other.txt"
+exists "$B6.zip"
+grep -q '^Verify:     OK' "$B6/_summary.txt" && ok || fail "saved verify choice not applied"
+grep -c '(saved)' "$T/err1c" | grep -q '^[0-9]' && ok
+
 echo "=== run 2: resume (adds one file, expects only it to be copied)"
 mk "$S/Users/bob/Documents/new-after-run1.txt" "new"
 cat >"$T/a2" <<A
@@ -199,7 +218,7 @@ yes
 no
 skip
 A
-bash "$SCRIPT" --src "$S" --dst "$D" --extra "$X" --answers "$T/a2" >"$T/out2" 2>"$T/err2"; rc=$?
+WB_PREFS=$T/prefs2 bash "$SCRIPT" --src "$S" --dst "$D" --extra "$X" --answers "$T/a2" >"$T/out2" 2>"$T/err2"; rc=$?
 [ $rc = 0 ] && ok || { fail "run 2 exit $rc"; tail -20 "$T/err2"; }
 exists "$B/Users/bob/Documents/new-after-run1.txt"
 grep -q ", resumed)" "$B/_summary.txt" && ok || fail "resume not detected"
@@ -215,7 +234,7 @@ bob
 docs
 yes
 A
-bash "$SCRIPT" --dry-run --src "$S" --dst "$D3" --answers "$T/a3" >"$T/out3" 2>"$T/err3"; rc=$?
+WB_PREFS=$T/prefs3 bash "$SCRIPT" --dry-run --src "$S" --dst "$D3" --answers "$T/a3" >"$T/out3" 2>"$T/err3"; rc=$?
 [ $rc = 0 ] && ok || { fail "run 3 exit $rc"; tail -20 "$T/err3"; }
 [ -z "$(ls -A "$D3")" ] && ok || fail "dry run wrote to destination: $(ls -A "$D3")"
 grep -q 'DRY RUN complete' "$T/out3" && ok || fail "dry run summary missing"
@@ -232,7 +251,7 @@ yes
 no
 skip
 A
-bash "$SCRIPT" --src "$S" --dst "$D4" --answers "$T/a4" >"$T/out4" 2>"$T/err4"; rc=$?
+WB_PREFS=$T/prefs4 bash "$SCRIPT" --src "$S" --dst "$D4" --answers "$T/a4" >"$T/out4" 2>"$T/err4"; rc=$?
 [ $rc = 0 ] && ok || { fail "run 4 exit $rc"; tail -20 "$T/err4"; }
 exists "$D4/WinBackup_$DATE/Users/bob/Documents/report.docx"
 absent "$D4/WinBackup_$DATE/Users/bob/AppData"
@@ -261,7 +280,7 @@ skip
 A
 idx=0; for d in "$S"/*/; do n=$(basename "$d"); case "$n" in Windows|Users|ProgramData) continue;; esac; [ "$n" = Temp ] && break; idx=$((idx+1)); done
 sed -i "s/^TEMPIDX$/$idx/" "$T/a4b"
-bash "$SCRIPT" --src "$S" --dst "$D5" --extra "$X" --answers "$T/a4b" >"$T/out4b" 2>"$T/err4b"; rc=$?
+WB_PREFS=$T/prefs4b bash "$SCRIPT" --src "$S" --dst "$D5" --extra "$X" --answers "$T/a4b" >"$T/out4b" 2>"$T/err4b"; rc=$?
 [ $rc = 0 ] && ok || { fail "run 4b exit $rc"; tail -20 "$T/err4b"; }
 exists "$D5/WinBackup_$DATE/Custom/thing.txt"
 exists "$D5/WinBackup_$DATE/Unwanted/x"
@@ -299,7 +318,7 @@ ryan
 overwrite
 yes
 A
-bash "$SCRIPT" --restore --src "$D" --dst "$W" --answers "$T/a5" >"$T/out5" 2>"$T/err5"; rc=$?
+WB_PREFS=$T/prefs5 bash "$SCRIPT" --restore --src "$D" --dst "$W" --answers "$T/a5" >"$T/out5" 2>"$T/err5"; rc=$?
 [ $rc = 0 ] && ok || { fail "run 5 exit $rc"; tail -20 "$T/err5"; }
 exists "$W/Users/ryan/Documents/report.docx"
 exists "$W/Users/ryan/AppData/Roaming/SomeApp/settings.json"

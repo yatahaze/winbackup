@@ -101,6 +101,34 @@ cleanup() {
 trap cleanup EXIT
 trap 'echo; echo "Interrupted."; exit 130' INT TERM
 
+# ---------------------------------------------------------------- saved preferences
+# Every answer is remembered under the dialog title in winbackup-prefs.txt next to the script.
+# Next run: "review" pre-selects them in the menus, "auto" skips the menus (Confirm is always shown).
+PREFS_FILE=${WB_PREFS:-$SCRIPT_DIR/winbackup-prefs.txt}
+PREFS_MODE=fresh
+declare -A PREF=()
+ASK_DEFAULT=""     # one-shot default for the next ask_menu (used by pick_part for device matching)
+load_prefs() {
+  [ -f "$PREFS_FILE" ] || return 1
+  local k v; while IFS=$'\t' read -r k v; do [[ -n "$k" && "$k" != \#* ]] && PREF[$k]=$v; done <"$PREFS_FILE"
+  [ ${#PREF[@]} -gt 0 ]
+}
+# remember/forget append to files because the prompts run inside $(...) subshells,
+# where a plain variable assignment would be lost.
+remember() { printf '%s\t%s\n' "$1" "$2" >>"$WORK/prefs.new"; }
+forget()   { printf '%s\n' "$1" >>"$WORK/prefs.forget"; }
+saved() { [ "$PREFS_MODE" != fresh ] && [ -n "${PREF[$1]+x}" ] && printf '%s\n' "${PREF[$1]}"; }
+auto_ok() { [ "$PREFS_MODE" = auto ] && [ "$1" != "Confirm" ] && [ -n "${PREF[$1]+x}" ]; }
+save_prefs() {
+  [ -s "$WORK/prefs.new" ] || return 0
+  local -A n=(); local k v
+  while IFS=$'\t' read -r k v; do [ -n "$k" ] && n[$k]=$v; done <"$WORK/prefs.new"      # last answer wins
+  [ -f "$WORK/prefs.forget" ] && while read -r k; do unset "n[$k]"; done <"$WORK/prefs.forget"
+  { echo "# winbackup saved answers ($(now)). One line per dialog: title<TAB>answer. Delete to start fresh."
+    for k in "${!n[@]}"; do printf '%s\t%s\n' "$k" "${n[$k]}"; done | sort; } >"$PREFS_FILE" 2>/dev/null \
+    && note "Saved your choices to $PREFS_FILE"
+}
+
 # ---------------------------------------------------------------- prompts
 # All user interaction goes through ask_* so that --answers FILE can drive the script
 # non-interactively (one answer per line, in the order the questions are asked).
@@ -124,30 +152,54 @@ esc() { printf '%s\n' "$1" | sed 's/[][*?\\]/\\&/g'; }
 
 ask_menu() {   # title text tag item [tag item...]  -> chosen tag
   local t=$1 m=$2; shift 2
-  if [ -n "$ANSWERS" ]; then local a; a=$(next_answer); printf '   %s\n' "$@" >&2; echo "[$t] -> $a" >&2; printf '%s\n' "$a"; return; fi
-  local n=$(( $# / 2 )) h; h=$(( n < 12 ? n : 12 ))
-  whiptail --title "$t" --menu "$m" "$(dlg_h $(( h + 7 + $(text_lines "$m") )))" 90 "$h" "$@" 3>&1 1>&2 2>&3
+  local a sv; sv=${ASK_DEFAULT:-$(saved "$t")}; ASK_DEFAULT=""
+  if auto_ok "$t"; then echo "[$t] -> $sv (saved)" >&2; remember "$t" "$sv"; printf '%s\n' "$sv"; return; fi
+  if [ -n "$ANSWERS" ]; then a=$(next_answer); printf '   %s\n' "$@" >&2; echo "[$t] -> $a" >&2; remember "$t" "$a"; printf '%s\n' "$a"; return; fi
+  local n=$(( $# / 2 )) h; h=$(( n < 12 ? n : 12 )) def=()
+  [ -n "$sv" ] && def=(--default-item "$sv")
+  a=$(whiptail --title "$t" "${def[@]}" --menu "$m" "$(dlg_h $(( h + 7 + $(text_lines "$m") )))" 90 "$h" "$@" 3>&1 1>&2 2>&3) || return 1
+  remember "$t" "$a"; printf '%s\n' "$a"
 }
 ask_check() {  # title text tag item ON|OFF ...  -> chosen tags, one per line
   local t=$1 m=$2; shift 2
+  local a out sv k j
+  if auto_ok "$t"; then sv=${PREF[$t]}; echo "[$t] -> $sv (saved)" >&2; remember "$t" "$sv"; [ -n "$sv" ] && tr ';' '\n' <<<"$sv"; return 0; fi
   if [ -n "$ANSWERS" ]; then
-    local a; a=$(next_answer)
-    if [ "$a" = "@all" ]; then local k; for (( k=1; k<=$#; k+=3 )); do printf '%s\n' "${!k}"; done
-    elif [ "$a" = "@default" ]; then local k j; for (( k=1; k<=$#; k+=3 )); do j=$((k+2)); [ "${!j}" = ON ] && printf '%s\n' "${!k}"; done
-    elif [ -n "$a" ]; then tr ';' '\n' <<<"$a"; fi
-    return 0
+    a=$(next_answer)
+    if [ "$a" = "@all" ]; then out=$(for (( k=1; k<=$#; k+=3 )); do printf '%s\n' "${!k}"; done)
+    elif [ "$a" = "@default" ]; then out=$(for (( k=1; k<=$#; k+=3 )); do j=$((k+2)); [ "${!j}" = ON ] && printf '%s\n' "${!k}"; done)
+    else out=$(tr ';' '\n' <<<"$a"); fi
+    remember "$t" "$(tr '\n' ';' <<<"$out" | sed 's/;$//')"; [ -n "$out" ] && printf '%s\n' "$out"; return 0
+  fi
+  # review mode: pre-tick exactly what was chosen last time
+  if [ -n "${PREF[$t]+x}" ] && [ "$PREFS_MODE" = review ]; then
+    local items=() sel=";${PREF[$t]};"
+    for (( k=1; k<=$#; k+=3 )); do j=$((k+1)); items+=("${!k}" "${!j}" "$( [[ "$sel" == *";${!k};"* ]] && echo ON || echo OFF )"); done
+    set -- "${items[@]}"
   fi
   local n=$(( $# / 3 )) h; h=$(( n < 12 ? n : 12 ))
-  whiptail --title "$t" --separate-output --checklist "$m" "$(dlg_h $(( h + 7 + $(text_lines "$m") )))" 90 "$h" "$@" 3>&1 1>&2 2>&3
+  out=$(whiptail --title "$t" --separate-output --checklist "$m" "$(dlg_h $(( h + 7 + $(text_lines "$m") )))" 90 "$h" "$@" 3>&1 1>&2 2>&3) || return 1
+  remember "$t" "$(tr '\n' ';' <<<"$out" | sed 's/;$//')"; [ -n "$out" ] && printf '%s\n' "$out"; return 0
 }
-ask_input() {  # title text default -> string
-  if [ -n "$ANSWERS" ]; then local a; a=$(next_answer); [ "$a" = "@default" ] && a=$3; printf '%s\n' "$a"; return; fi
-  whiptail --title "$1" --inputbox "$2" "$(dlg_h $(( 8 + $(text_lines "$2") )))" 80 "$3" 3>&1 1>&2 2>&3
+ask_input() {  # title text default -> string   (an answer equal to the default is saved as @default,
+  local a sv def=$3 #  so e.g. WinBackup_<date> re-derives today's date next time)
+  sv=$(saved "$1"); [ "$sv" = "@default" ] && sv=$def
+  if auto_ok "$1"; then echo "[$1] -> $sv (saved)" >&2; a=$sv
+  elif [ -n "$ANSWERS" ]; then a=$(next_answer); [ "$a" = "@default" ] && a=$def
+  else a=$(whiptail --title "$1" --inputbox "$2" "$(dlg_h $(( 8 + $(text_lines "$2") )))" 80 "${sv:-$def}" 3>&1 1>&2 2>&3) || return 1; fi
+  if [ "$a" = "$def" ]; then remember "$1" "@default"; else remember "$1" "$a"; fi
+  printf '%s\n' "$a"
 }
 ask_yesno() {  # title text [--defaultno] -> 0 yes / 1 no
-  if [ -n "$ANSWERS" ]; then local a; a=$(next_answer); [ "$a" = yes ]; return; fi
-  local extra=(); [ -n "${3:-}" ] && extra=("$3")
-  whiptail --title "$1" --scrolltext --yesno "$2" "$(dlg_h $(( 6 + $(text_lines "$2") )))" 90 "${extra[@]}"
+  local a sv; sv=$(saved "$1")
+  if auto_ok "$1"; then echo "[$1] -> $sv (saved)" >&2; a=$sv
+  elif [ -n "$ANSWERS" ]; then a=$(next_answer)
+  else
+    local extra=(); [ -n "${3:-}" ] && extra=("$3")
+    [ "$sv" = no ] && extra=(--defaultno); [ "$sv" = yes ] && extra=()
+    if whiptail --title "$1" --scrolltext --yesno "$2" "$(dlg_h $(( 6 + $(text_lines "$2") )))" 90 "${extra[@]}"; then a=yes; else a=no; fi
+  fi
+  remember "$1" "$a"; [ "$a" = yes ]
 }
 ask_msg() {    # title text
   if [ -n "$ANSWERS" ]; then printf '\n[%s]\n%s\n' "$1" "$2" >&2; return; fi
@@ -201,7 +253,18 @@ pick_part() {
     items+=("$dev" "$desc")
   done < <(list_parts "$3")
   [ ${#items[@]} -gt 0 ] || { ask_msg "No partitions" "No suitable partitions found (looked for: $3).\nIs the drive plugged in? Check with: lsblk -f"; return 1; }
-  ask_menu "$1" "$2" "${items[@]}"
+  local sv; sv=$(saved "part:$1")
+  if [ -n "$sv" ]; then
+    local sdev=${sv%%|*} rest=${sv#*|} slabel=${rest%%|*} ssize=${rest#*|}
+    while IFS='|' read -r dev fs size label mp; do
+      if { [ -n "$slabel" ] && [ "$label" = "$slabel" ] && [ "$size" = "$ssize" ]; } || { [ -z "$slabel" ] && [ "$dev" = "$sdev" ] && [ "$size" = "$ssize" ]; }; then ASK_DEFAULT=$dev; break; fi
+    done < <(list_parts "$3")
+    [ -n "$ASK_DEFAULT" ] || { note "Saved drive for '$1' ($slabel $ssize) not found; asking."; PREF[$1]=""; }
+  fi
+  dev=$(ask_menu "$1" "$2" "${items[@]}") || return 1
+  local pl ps; pl=$(part_label "$dev"); ps=$(lsblk -no SIZE "$dev" 2>/dev/null | head -1)
+  remember "part:$1" "$dev|$pl|$ps"; forget "$1"
+  printf '%s\n' "$dev"
 }
 part_label() { lsblk -no LABEL "$1" 2>/dev/null | head -1; }
 part_fstype() { lsblk -no FSTYPE "$1" 2>/dev/null | head -1; }
@@ -485,6 +548,13 @@ rs() { printf '%s rsync' "$(now)" >>"$WORK/commands.log"; printf ' %q' "$@" >>"$
 # ================================================================= BACKUP
 backup_main() {
   ensure_exclude_file
+  if load_prefs; then
+    local pm; pm=$(ask_menu "Saved preferences" "Choices from your last run were found in $(basename "$PREFS_FILE"):" \
+      review "Go through the menus with last time's answers pre-selected (recommended)" \
+      auto   "Skip the menus: reuse last time's answers, show only the size check and Confirm" \
+      fresh  "Ignore them and start from the defaults") || exit 1
+    PREFS_MODE=$pm; forget "Saved preferences"
+  fi
   local SRC SRC_DEV="" DST_DEV="" DSTROOT NAME RESUMED=0
   DST=""
 
@@ -834,6 +904,7 @@ Largest excluded items:
 ${EXCL_TXT:-(none)}
 
 $( [ "$DRY" = 1 ] && echo 'DRY RUN: nothing will be written. Continue?' || echo 'Start the copy?')" || exit 1
+  forget Confirm; forget "Folder exists"; save_prefs
 
   # ---- 10. copy ----
   local ZIP=no
@@ -928,7 +999,7 @@ S
       rm -f "$zp"; python3 -c "$PY_ZIP" "$DST" "$zp" 2>>"$ERRLOG" && echo "   zip done: $(du -h "$zp" | cut -f1)"
     fi
   fi
-  sync
+  save_prefs; sync
   ask_msg "Done" "Backup finished.
 
 $DST
