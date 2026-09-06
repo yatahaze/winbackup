@@ -692,6 +692,44 @@ hives, Windows itself). Untick only what you are sure you do not want. Space tog
     while IFS= read -r i; do [ -n "$i" ] && want "${O_DRV[$i]}" "${O_NAME[$i]}"; done <<<"$out"
   fi
 
+  # ---- 8b. optional drill-down: go through a folder item by item (e.g. C:\Temp) ----
+  # Untick items become explicit excludes for that folder; everything else in it is still copied.
+  local R_DRV=() R_REL=() r
+  for i in "${!DRV_ROOT[@]}"; do
+    while IFS= read -r r; do
+      [ -n "$r" ] || continue
+      case "$r" in Users/*|ProgramData|*/steamapps|*/userdata|*/config) continue;; esac
+      [ -d "${DRV_ROOT[$i]}/$r" ] && { R_DRV+=("$i"); R_REL+=("$r"); }
+    done <<<"${DRV_WANT[$i]}"
+  done
+  if [ ${#R_DRV[@]} -gt 0 ]; then
+    items=()
+    for i in "${!R_DRV[@]}"; do items+=("$i" "${DRV_NAME[${R_DRV[$i]}]}:\\${R_REL[$i]//\//\\}" OFF); done
+    local out; out=$(ask_check "Go through any folder item by item?" "Optional. Tick a folder (e.g. C:\\Temp) to see what is inside it with sizes and choose piece by piece.
+Leave everything unticked to copy those folders whole." "${items[@]}") || exit 1
+    while IFS= read -r i; do
+      [ -n "$i" ] || continue
+      local rroot="${DRV_ROOT[${R_DRV[$i]}]}/${R_REL[$i]}" c cn csz
+      items=()
+      echo "Sizing ${DRV_NAME[${R_DRV[$i]}]}:\\${R_REL[$i]//\//\\} ..."
+      # sizes are a courtesy: give up after 60s for the whole folder rather than stall on a huge one
+      local szfile="$WORK/sizes_$i"; : >"$szfile"
+      ( cd "$rroot" && timeout 60 du -sb -- * .[!.]* 2>/dev/null ) >"$szfile"
+      for c in "$rroot"/* "$rroot"/.[!.]*; do
+        [ -e "$c" ] || continue; cn=$(basename "$c")
+        csz=$(awk -F'\t' -v n="$cn" '$2==n{print $1; exit}' "$szfile")
+        items+=("$cn" "$( [ -d "$c" ] && echo '[dir] ' )${csz:+$(hr "$csz")}${csz:-?}" ON)
+      done
+      [ ${#items[@]} -gt 0 ] || continue
+      local keep; keep=$(ask_check "${DRV_NAME[${R_DRV[$i]}]}:\\${R_REL[$i]//\//\\}" "Untick what you do NOT want. (Junk from the exclude list is still skipped inside what you keep.)" "${items[@]}") || exit 1
+      for c in "$rroot"/* "$rroot"/.[!.]*; do
+        [ -e "$c" ] || continue; cn=$(basename "$c")
+        grep -qxF -- "$cn" <<<"$keep" && continue
+        if [ -d "$c" ]; then xcl "${R_DRV[$i]}" "$(esc "${R_REL[$i]}/$cn")/"; else xcl "${R_DRV[$i]}" "$(esc "${R_REL[$i]}/$cn")"; fi
+      done
+    done <<<"$out"
+  fi
+
   # ---- 9. estimate ----
   local any=0; for i in "${!DRV_ROOT[@]}"; do [ -n "${DRV_WANT[$i]}" ] && any=1; done
   [ "$any" = 1 ] || { ask_msg "Nothing selected" "Nothing to back up."; exit 1; }

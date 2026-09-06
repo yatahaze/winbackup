@@ -69,6 +69,10 @@ mk "$S/Apps/World of Warcraft/_retail_/Cache/x"
 mk "$S/Apps/World of Warcraft/_retail_/WTF/Config.wtf" "settings"
 mk "$S/Apps/World of Warcraft/_retail_/Interface/AddOns/Foo/Foo.lua"
 mk "$S/Apps/Other Game/keep.exe"
+mk "$S/Temp/project-a/work.txt"
+mk "$S/Temp/junk-b/big.bin"
+mk "$S/Temp/note.txt"
+mk "$S/Temp/scratch.iso"
 mk "$S/Unwanted/x"
 mk "$S/pagefile.sys"
 mk '$S/$RECYCLE.BIN/S-1/junk'
@@ -97,6 +101,7 @@ docs;roaming;local;dotfiles;other;steam;steamgames;root;pdata
 @all
 Custom
 1
+
 yes
 yes
 quick
@@ -189,6 +194,7 @@ docs;roaming;local;dotfiles;other;steam;steamgames;root;pdata
 @all
 Custom
 1
+
 yes
 no
 skip
@@ -247,10 +253,14 @@ docs;steam;steamgames;root;pdata
 @all
 @default
 @default
+TEMPIDX
+project-a;note.txt
 yes
 no
 skip
 A
+idx=0; for d in "$S"/*/; do n=$(basename "$d"); case "$n" in Windows|Users|ProgramData) continue;; esac; [ "$n" = Temp ] && break; idx=$((idx+1)); done
+sed -i "s/^TEMPIDX$/$idx/" "$T/a4b"
 bash "$SCRIPT" --src "$S" --dst "$D5" --extra "$X" --answers "$T/a4b" >"$T/out4b" 2>"$T/err4b"; rc=$?
 [ $rc = 0 ] && ok || { fail "run 4b exit $rc"; tail -20 "$T/err4b"; }
 exists "$D5/WinBackup_$DATE/Custom/thing.txt"
@@ -267,6 +277,10 @@ absent "$D5/WinBackup_$DATE/Apps/World of Warcraft/_retail_/Cache"
 exists "$D5/WinBackup_$DATE/Apps/World of Warcraft/_retail_/WTF/Config.wtf"
 exists "$D5/WinBackup_$DATE/Apps/World of Warcraft/_retail_/Interface/AddOns/Foo/Foo.lua"
 exists "$D5/WinBackup_$DATE/Apps/Other Game/keep.exe"
+exists "$D5/WinBackup_$DATE/Temp/project-a/work.txt"
+exists "$D5/WinBackup_$DATE/Temp/note.txt"
+absent "$D5/WinBackup_$DATE/Temp/junk-b"
+absent "$D5/WinBackup_$DATE/Temp/scratch.iso"
 absent "$D5/WinBackup_$DATE/pagefile.sys"
 exists "$D5/WinBackup_$DATE/Drive_Data/Games/other.txt"
 exists "$D5/WinBackup_$DATE/Drive_Data/Photos/p.jpg"
