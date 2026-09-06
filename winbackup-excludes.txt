@@ -148,6 +148,9 @@ ProgramData/Microsoft/Windows/DeliveryOptimization/
 ProgramData/NVIDIA Corporation/Downloader/
 ProgramData/NVIDIA Corporation/NV_Cache/
 ProgramData/USOShared/
+ProgramData/Backblaze/
+ProgramData/NVIDIA Corporation/Installer2/
+ProgramData/Topaz Labs LLC/
 
 # ---- big game installs under C:\Apps that are not wanted (saves are in Saved Games / Documents) ----
 # leading "/" anchors to the drive root; [Aa] matches either capitalisation
