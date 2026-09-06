@@ -88,6 +88,9 @@ STAMP_DATE=$(date +%Y-%m-%d)
 cleanup() {
   local rc=$?
   sync
+  # an orderly exit (including Ctrl-C) is not a crash: rsync has cleaned up after itself and the
+  # data is flushed, so the crash marker is only left behind by power loss / hard reset
+  [ -n "${DST:-}" ] && [ -d "${DST:-/nonexistent}" ] && rm -f "$DST/_run_in_progress"
   [ -n "$INHIBIT_PID" ] && kill "$INHIBIT_PID" 2>/dev/null
   # whatever was answered so far is kept, even after a cancel or Ctrl-C
   [ "$MODE" = backup ] && save_prefs
