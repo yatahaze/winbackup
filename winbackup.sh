@@ -412,9 +412,13 @@ import sys, re, time, os
 label, offset, total, statsfile = sys.argv[1], int(sys.argv[2]), int(sys.argv[3]), sys.argv[4]
 ftotal, foffset = (int(sys.argv[5]), int(sys.argv[6])) if len(sys.argv) > 6 else (0, 0)
 prog = re.compile(r'^\s*([\d,]+)\s+(\d+)%\s+(\S+)\s+(\d+:\d+:\d+)')
+newf = re.compile(r'^(\d+) (.+)$')          # "<length> <name>" printed by --out-format when a file starts
 statkeys = ('Number of files', 'Number of regular files transferred', 'Total file size', 'Total transferred file size')
 def fmt_eta(sec): return f'{int(sec//3600)}:{int(sec%3600//60):02d}:{int(sec%60):02d}'
-fhist = []   # (time, nfiles) samples for a rolling files/s
+def bar(frac, width=20):
+    n = int(max(0.0, min(1.0, frac)) * width); return '[' + '#' * n + '.' * (width - n) + ']'
+fhist = []   # (time, nfiles, bytes) samples for rolling rates
+completed, curlen, curbytes = 0, 0, 0   # bytes of finished files; size and progress of the current one
 noise = ('sending incremental', 'sent ', 'total size', 'Number of', 'Total ', 'File list', 'Literal data',
          'Matched data', 'skipping', 'created directory', 'rsync', '(DRY RUN)', 'delta-transmission')
 def hr(n):
@@ -442,9 +446,11 @@ def status():
     eta = f'ETA {fmt_eta(max(etas))}' if etas else ''
     fpart = f'files {foffset + nfiles}/{ftotal} ({fps:.0f}/s)' if ftotal else f'files:{nfiles} ({fps:.0f}/s)'
     w = cols()
-    l1 = f'{label} {pct:3d}%  {hr(ov)} / {hr(total)}  {rate}  {fpart}  {eta}'
-    c = cur if len(cur) < w - 3 else '...' + cur[-(w - 6):]
-    return ('\x1b[2K' + l1[:w-1] + '\n\x1b[2K  > ' + c[:w-5] + '\x1b[1A\r')
+    l1 = f'{label} {pct:3d}%  {hr(ov)} / {hr(total)}  {hr(bps)}/s  {fpart}  {eta}'
+    fb = f' {bar(curbytes / curlen if curlen else 1.0)} {int(100 * curbytes / curlen) if curlen else 100:3d}%  {hr(curbytes)}/{hr(curlen)}' if curlen > 1 << 20 else ''
+    room = w - 5 - len(fb)
+    c = cur if len(cur) < room else '...' + cur[-(room - 3):]
+    return ('\x1b[2K' + l1[:w-1] + '\n\x1b[2K  > ' + c + fb + '\x1b[1A\r')
 def draw(): sys.stdout.write('\r' + status()); sys.stdout.flush()
 def scroll(name):
     # every file scrolls past above the two pinned status lines; the status itself is redrawn at
@@ -470,14 +476,18 @@ while True:
         if not line.strip(): continue
         m = prog.match(line)
         if m:
-            done = int(m.group(1).replace(',', '')); rate = m.group(3)
+            curbytes = int(m.group(1).replace(',', '')); rate = m.group(3)
+            done = completed + min(curbytes, curlen)
+            continue
+        m = newf.match(line)
+        if m and not line.endswith('/'):
+            completed += curlen; curlen = int(m.group(1)); curbytes = 0; done = completed
+            nfiles += 1; cur = m.group(2); scroll(cur)
         elif line.startswith(statkeys):
             stats.append(line)
-        elif not line.startswith(noise):
-            if not line.endswith('/'): nfiles += 1; scroll(line)
-            cur = line
         if time.time() - last > 0.15:
             draw(); last = time.time()
+completed += curlen; curbytes = curlen; done = completed
 draw(); sys.stdout.write('\n\n'); sys.stdout.flush()
 with open(statsfile, 'w') as f: f.write('\n'.join(stats) + '\n')
 PY
@@ -687,13 +697,13 @@ read -r -d '' PY_WORKER <<'PY'
 import sys, re, time, os
 state, statsfile = sys.argv[1], sys.argv[2]
 prog = re.compile(r'^\s*([\d,]+)\s+(\d+)%\s+(\S+)\s+(\d+:\d+:\d+)')
+newf = re.compile(r'^(\d+) (.+)$')
 statkeys = ('Number of files', 'Number of regular files transferred', 'Total file size', 'Total transferred file size')
-noise = ('sending incremental', 'sent ', 'total size', 'Number of', 'Total ', 'File list', 'Literal data',
-         'Matched data', 'skipping', 'created directory', 'rsync', '(DRY RUN)', 'delta-transmission')
 stats, cur, done, last, buf, nfiles = [], '', 0, 0.0, '', 0
+completed, curlen, curbytes = 0, 0, 0
 def flush():
     tmp = state + '.tmp'
-    with open(tmp, 'w') as f: f.write(f'{done}\t{nfiles}\t{cur}')
+    with open(tmp, 'w') as f: f.write(f'{done}\t{nfiles}\t{curbytes}\t{curlen}\t{cur}')
     os.replace(tmp, state)
 while True:
     chunk = sys.stdin.buffer.read(8192)
@@ -703,12 +713,15 @@ while True:
     for line in parts:
         if not line.strip(): continue
         m = prog.match(line)
-        if m: done = int(m.group(1).replace(',', ''))
+        if m:
+            curbytes = int(m.group(1).replace(',', '')); done = completed + min(curbytes, curlen); continue
+        m = newf.match(line)
+        if m and not line.endswith('/'):
+            completed += curlen; curlen = int(m.group(1)); curbytes = 0; done = completed
+            nfiles += 1; cur = m.group(2)
         elif line.startswith(statkeys): stats.append(line)
-        elif not line.startswith(noise):
-            cur = line
-            if not line.endswith('/'): nfiles += 1
         if time.time() - last > 0.2: flush(); last = time.time()
+completed += curlen; curbytes = curlen; done = completed
 flush()
 with open(statsfile, 'w') as f: f.write('\n'.join(stats) + '\n')
 open(state + '.done', 'w').close()
@@ -731,14 +744,19 @@ t0 = time.time(); states = sorted(glob.glob(os.path.join(sdir, 'w*.state')))
 n = len(states); drawn = 0
 while True:
     done = 0; lines = []; finished = 0; nfiles = 0
-    for st in states:
+    for k, st in enumerate(states):
         try:
-            b, nf, cur = open(st).read().split('\t', 2)
-        except (OSError, ValueError): b, nf, cur = '0', '0', ''
-        done += int(b or 0); nfiles += int(nf or 0)
+            b, nf, cb, cl, cur = open(st).read().split('\t', 4)
+        except (OSError, ValueError): b, nf, cb, cl, cur = '0', '0', '0', '0', ''
+        done += int(b or 0); nfiles += int(nf or 0); cb = int(cb or 0); cl = int(cl or 0)
         fin = os.path.exists(st + '.done'); finished += fin
-        w = cols(); tag = 'done ' if fin else 'copy '
-        lines.append(('  ' + tag + (cur if len(cur) < w - 10 else '...' + cur[-(w - 13):]))[:w-1])
+        w = cols()
+        if fin: pre = f'  w{k+1} done  '
+        else:
+            frac = cb / cl if cl else 1.0; nb = int(max(0.0, min(1.0, frac)) * 16)
+            pre = f'  w{k+1} [' + '#' * nb + '.' * (16 - nb) + f'] {int(100*frac):3d}% ' + (f'{hr(cb)}/{hr(cl)} ' if cl > 1 << 20 else '')
+        room = w - 1 - len(pre)
+        lines.append(pre + (cur if len(cur) < room else '...' + cur[-(room - 3):]))
     ov = min(offset + done, total) if total else 0
     pct = int(100 * ov / total) if total else 100
     now = time.time(); el = now - t0; rate = done / el if el > 0 else 0
@@ -771,7 +789,7 @@ copy_parallel() {
   for (( w=0; w<N; w++ )); do
     [ -f "$WORK/wfilter_${i}_$w" ] || continue
     : >"$sdir/w$w.state"
-    ( rs "${RS_BASE[@]}" --outbuf=N --info=progress2,name1 --stats $( [ "$DRY" = 1 ] && printf -- '--dry-run' ) \
+    ( rs "${RS_BASE[@]}" --outbuf=N --progress --out-format='%l %n' --stats $( [ "$DRY" = 1 ] && printf -- '--dry-run' ) \
         --exclude-from="$EXC_USED" "${PACKX_OPT[@]}" --filter="merge $WORK/wfilter_${i}_$w" "${DRV_ROOT[$i]}/" "$dest/" 2>>"$sdir/err$w" \
         | python3 -c "$PY_WORKER" "$sdir/w$w.state" "$sdir/stats$w"
       echo "${PIPESTATUS[0]}" >"$sdir/rc$w" ) &
@@ -1555,7 +1573,7 @@ $( [ "$DRY" = 1 ] && echo 'DRY RUN: nothing will be written.' )" \
       copy_parallel "$i" "$dest" "$offset"; rc=$P_RC
       printf 'Total transferred file size: %s bytes\nNumber of regular files transferred: %s\n' "$P_COPIED" "$P_NCOPIED" >"$st"
     else
-      rs "${RS_BASE[@]}" --outbuf=N --info=progress2,name1 --stats \
+      rs "${RS_BASE[@]}" --outbuf=N --progress --out-format='%l %n' --stats \
         $( [ "$DRY" = 1 ] && printf -- '--dry-run' ) \
         --exclude-from="$EXC_USED" "${PACKX_OPT[@]}" --filter="merge $WORK/filter_$i" "${DRV_ROOT[$i]}/" "$dest/" 2>>"$ERRLOG" \
         | python3 -c "$PY_PROGRESS" "[${DRV_NAME[$i]}]" "$offset" "$TOT_XFER" "$st" "$RS_N" "$foffset"
@@ -1881,7 +1899,7 @@ Start?" || exit 1
       mkdir -p "$dst"
       local zx=() z zrel srel=${s#"$BK"/}; srel=${srel%/}
       for z in "${PACKED[@]}"; do zrel=${z#"$srel"/}; [ "$zrel" != "$z" ] && zx+=(--exclude="/$(esc "$zrel")"); done
-      rsync "${RS_BASE[@]}" "${POL[@]}" "${zx[@]}" --outbuf=N --info=progress2,name1 --stats "$s/" "$dst/" 2>>"$LOG" \
+      rsync "${RS_BASE[@]}" "${POL[@]}" "${zx[@]}" --outbuf=N --progress --out-format='%l %n' --stats "$s/" "$dst/" 2>>"$LOG" \
         | python3 -c "$PY_PROGRESS" "[restore]" "$offset" "$TOT" "$WORK/rst_$i"
       rc=${PIPESTATUS[0]}
       for z in "${PACKED[@]}"; do
