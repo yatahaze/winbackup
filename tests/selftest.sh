@@ -214,8 +214,13 @@ grep -q 'parallel workers' "$T/out1c" && ok || fail "parallel mode not used"
 grep -q 'copied this run: 38.2MB in 30 files' "$B6/_summary.txt" && ok || { fail "parallel stats not summed"; grep 'copied this run' "$B6/_summary.txt"; }
 grep -c '(saved)' "$T/err1c" | grep -q '^[0-9]' && ok
 
-echo "=== run 2: resume (adds one file, expects only it to be copied)"
+echo "=== run 2: resume after a simulated crash (adds one file; a corrupted file and an rsync temp file are left behind)"
 mk "$S/Users/bob/Documents/new-after-run1.txt" "new"
+echo "2026-01-01 00:00:00" >"$B/_run_in_progress"
+printf 'CORRUPT' >"$B/Users/bob/Documents/a-corrupt.txt"; touch -r "$S/Users/bob/Documents/report.docx" "$B/Users/bob/Documents/a-corrupt.txt"   # wrong content, same mtime as source
+mk "$S/Users/bob/Documents/a-corrupt.txt" "CORRECT"; touch -r "$B/Users/bob/Documents/a-corrupt.txt" "$S/Users/bob/Documents/a-corrupt.txt"
+printf 'partial' >"$B/Users/bob/Documents/.report.docx.Ab3xYz"
+printf 'keep' >"$B/Users/bob/Documents/.env.backup"
 cat >"$T/a2" <<A
 PoolPart.abc123
 Backups/WinBackup_$DATE
@@ -236,6 +241,11 @@ exists "$B/Users/bob/Documents/new-after-run1.txt"
 grep -q ", resumed)" "$B/_summary.txt" && ok || fail "resume not detected"
 grep -q 'copied this run: 3.0B in 1 files' "$B/_summary.txt" && ok || { fail "resume copied more than the new file"; grep 'copied this run' "$B/_summary.txt"; }
 [ "$(grep -c '^Run:' "$B/_summary.txt")" = 2 ] && ok || fail "summary should list two runs"
+[ "$(cat "$B/Users/bob/Documents/a-corrupt.txt")" = CORRECT ] && ok || fail "crash recovery did not re-copy the corrupted file"
+absent "$B/Users/bob/Documents/.report.docx.Ab3xYz"
+exists "$B/Users/bob/Documents/.env.backup"
+absent "$B/_run_in_progress"
+grep -q 'crash recovery' "$B/_errors.log" && ok || fail "crash recovery not logged"
 
 echo "=== run 3: dry run writes nothing"
 D3=$T/dst3; mkdir -p "$D3"

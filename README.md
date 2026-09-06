@@ -33,6 +33,7 @@ other drives under `Drive_<label>\`). Also written: `README_RESTORE.txt`, `_mani
 * Size browser: on the confirm screen, "Browse sizes" walks what would be copied largest-first (WinDirStat-style) and lets you exclude folders/files; those exclusions are saved with the preferences.
 * Drill-down: after the folder lists you can pick any folder (e.g. C:\Temp) and tick/untick its contents item by item, with sizes.
 * Steam: "saves + settings" (userdata, config) is on by default; "installed Steam games" (steamapps) is a separate category, off by default.
+* Crash recovery: if a run ended abruptly (power loss, hard reset), the next resume deletes leftover rsync temp files and checksum-rechecks everything written in the last 10 minutes before the cut.
 * Resume: rerun with the same destination folder; rsync skips files already copied (size+mtime).
 * Verify step at the end: quick (presence + size/mtime) or full (checksums).
 

@@ -1244,6 +1244,8 @@ $( [ "$DRY" = 1 ] && echo 'DRY RUN: nothing will be written.' )" \
     { echo "Deliberately NOT backed up (unticked / excluded by hand):"; cat "$WORK/not_backed_up.txt" 2>/dev/null
       awk -F'\t' '{ p=$2; gsub("/", "\\", p); printf "  Size browser: %s:\\%s\n", $1, p }' "$BROWSE_XCL" 2>/dev/null; } >"$DST/_not_backed_up.txt"
     [ "$RESUMED" = 1 ] || printf 'Started: %s\n' "$T_START" >"$DST/_summary.txt"
+    crash_recovery
+    date '+%Y-%m-%d %H:%M:%S' >"$DST/_run_in_progress"   # removed at a clean end; presence on resume = crash
   fi
   clear 2>/dev/null
   echo "winbackup $VERSION  $( [ "$DRY" = 1 ] && echo '*** DRY RUN ***' )"
@@ -1331,6 +1333,7 @@ S
       rm -f "$zp"; python3 -c "$PY_ZIP" "$DST" "$zp" 2>>"$ERRLOG" && echo "   zip done: $(du -h "$zp" | cut -f1)"
     fi
   fi
+  rm -f "$DST/_run_in_progress"
   save_prefs; sync
   ask_msg "Done" "Backup finished.
 
@@ -1343,6 +1346,45 @@ Verify:           $VRES
 
 README_RESTORE.txt in the folder explains how to put things back.
 Drives will be unmounted when you press OK."
+}
+
+# crash_recovery: called when a copy is about to start into an existing folder. If the previous run
+# ended abruptly (power loss / hard reset: _run_in_progress still there), two things can be wrong:
+#   1. rsync temp files (.name.XXXXXX) left in the tree           -> deleted
+#   2. files that were "finished" but only in the disk cache        -> re-checked with checksums
+# We cannot use mtime (rsync copies the source mtime); NTFS ctime is set at write time, so files
+# with a ctime in the last 10 minutes before the newest ctime on the destination are the suspects.
+crash_recovery() {
+  [ -f "$DST/_run_in_progress" ] || return 0
+  local since; since=$(cat "$DST/_run_in_progress" 2>/dev/null)
+  echo "== previous run (started $since) did not finish cleanly; checking what it wrote last..."
+  local newest; newest=$(find "$DST" -type f ! -name '_*' -printf '%C@\n' 2>/dev/null | sort -n | tail -1); newest=${newest%.*}
+  [ -n "$newest" ] || { rm -f "$DST/_run_in_progress"; return 0; }
+  local win=$(( newest - 600 )) i n=0 t base
+  # 1. leftover rsync temp files from that window (only if the real file exists in the source)
+  while IFS= read -r t; do
+    base=$(basename "$t"); base=${base#.}; base=${base%.??????}
+    local rel=${t#"$DST"/}; rel=$(dirname "$rel")/$base
+    for i in "${!DRV_ROOT[@]}"; do
+      local pre=${DRV_PREFIX[$i]}
+      [[ "$rel" == "$pre"* ]] && [ -e "${DRV_ROOT[$i]}/${rel#"$pre"}" ] && { rm -f -- "$t"; n=$((n+1)); break; }
+    done
+  done < <(find "$DST" -type f -name '.*.??????' -newerct "@$win" 2>/dev/null)
+  echo "   removed $n leftover rsync temp file(s)"
+  # 2. checksum re-check of files written in the last 10 minutes before the cut
+  for i in "${!DRV_ROOT[@]}"; do
+    [ -n "${DRV_WANT[$i]}" ] || continue
+    local dest="$DST/${DRV_PREFIX[$i]}" lst="$WORK/recheck_$i"
+    [ -d "$dest" ] || continue
+    find "$dest" -type f ! -name '_*' ! -name '.*.??????' -newerct "@$win" -printf '%P\n' 2>/dev/null >"$lst"
+    [ -s "$lst" ] || continue
+    local cnt; cnt=$(wc -l <"$lst")
+    echo "   ${DRV_NAME[$i]}: re-checking $cnt file(s) written just before the cut (checksums)..."
+    rs "${RS_BASE[@]}" --checksum --files-from="$lst" --stats "${DRV_ROOT[$i]}/" "$dest/" 2>>"$ERRLOG" >"$WORK/recheck_stats_$i"
+    echo "   ${DRV_NAME[$i]}: $(stat_num "$WORK/recheck_stats_$i" 'Number of regular files transferred') of $cnt had to be copied again"
+    echo "=== $(now) crash recovery ${DRV_NAME[$i]}: rechecked $cnt, recopied $(stat_num "$WORK/recheck_stats_$i" 'Number of regular files transferred')" >>"$ERRLOG"
+  done
+  rm -f "$DST/_run_in_progress"
 }
 
 write_readme() {  # dst users categories
