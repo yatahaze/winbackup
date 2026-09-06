@@ -29,6 +29,7 @@ other drives under `Drive_<label>\`). Also written: `README_RESTORE.txt`, `_mani
   matched from the drive root, so `AppData/Local/Temp/` and `AppData/**/Cache/` work as expected.
 * Defaults are a full copy of the drive: every profile, every other folder on C: (never \Windows), ProgramData, Steam. Untick what you do not want.
 * Saved preferences: every answer is written to winbackup-prefs.txt next to the script; the next run offers to pre-select them (review) or skip the menus entirely (auto). Delete the file to start fresh.
+* Size browser: on the confirm screen, "Browse sizes" walks what would be copied largest-first (WinDirStat-style) and lets you exclude folders/files; those exclusions are saved with the preferences.
 * Drill-down: after the folder lists you can pick any folder (e.g. C:\Temp) and tick/untick its contents item by item, with sizes.
 * Steam: "saves + settings" (userdata, config) is on by default; "installed Steam games" (steamapps) is a separate category, off by default.
 * Resume: rerun with the same destination folder; rsync skips files already copied (size+mtime).

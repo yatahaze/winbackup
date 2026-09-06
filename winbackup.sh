@@ -75,7 +75,7 @@ cleanup() {
   local rc=$?
   sync
   if [ -n "$DIAG" ]; then
-    cp "$WORK"/mount.log "$WORK"/commands.log "$WORK"/errors.log "$WORK"/filter_* "$WORK"/stats_* "$DIAG"/ 2>/dev/null
+    cp "$WORK"/mount.log "$WORK"/commands.log "$WORK"/errors.log "$WORK"/filter_* "$WORK"/stats_* "$WORK"/size_breakdown.txt "$WORK"/excluded_summary.txt "$DIAG"/ 2>/dev/null
     for f in "$WORK"/est_*; do [ -f "$f" ] && { grep -v '^\[sender\] \(hiding\|showing\)' "$f" | head -200 >"$DIAG/$(basename "$f").txt"; }; done
     [ -n "${DST:-}" ] && cp "$DST"/_errors.log "$DST"/_summary.txt "$DIAG"/ 2>/dev/null
     echo "exit code $rc at $(now)" >>"$DIAG/commands.log"
@@ -115,10 +115,11 @@ load_prefs() {
 }
 # remember/forget append to files because the prompts run inside $(...) subshells,
 # where a plain variable assignment would be lost.
-remember() { printf '%s\t%s\n' "$1" "$2" >>"$WORK/prefs.new"; }
+remember() { [ -n "$NOPREF" ] || printf '%s\t%s\n' "$1" "$2" >>"$WORK/prefs.new"; }
 forget()   { printf '%s\n' "$1" >>"$WORK/prefs.forget"; }
-saved() { [ "$PREFS_MODE" != fresh ] && [ -n "${PREF[$1]+x}" ] && printf '%s\n' "${PREF[$1]}"; }
-auto_ok() { [ "$PREFS_MODE" = auto ] && [ "$1" != "Confirm" ] && [ -n "${PREF[$1]+x}" ]; }
+NOPREF=""          # set while in the size browser: those menus are neither saved nor auto-answered
+saved() { [ -z "$NOPREF" ] && [ "$PREFS_MODE" != fresh ] && [ -n "${PREF[$1]+x}" ] && printf '%s\n' "${PREF[$1]}"; }
+auto_ok() { [ -z "$NOPREF" ] && [ "$PREFS_MODE" = auto ] && [ "$1" != "Confirm" ] && [ -n "${PREF[$1]+x}" ]; }
 save_prefs() {
   [ -s "$WORK/prefs.new" ] || return 0
   local -A n=(); local k v
@@ -730,8 +731,12 @@ hives, Windows itself). Untick only what you are sure you do not want. Space tog
     if [ ${#S_DRV[@]} -gt 0 ]; then
       items=()
       for i in "${!S_DRV[@]}"; do items+=("$i" "${DRV_NAME[${S_DRV[$i]}]}:\\${S_REL[$i]//\//\\}" ON); done
-      local parts=() what=""; has steam && { parts+=(userdata config); what="userdata + config (saves/settings)"; }
+      local parts=() what="" nots=(); has steam && { parts+=(userdata config); what="userdata + config (saves/settings)"; }
       has steamgames && { parts+=(steamapps); what="${what:+$what, }steamapps (installed games)"; }
+      has steamgames || nots+=(steamapps); has steam || nots+=(userdata config)
+      # parts of every library that were NOT ticked are excluded explicitly, so they are left out
+      # even when the folder containing the library (e.g. Program Files (x86)) is copied whole
+      for i in "${!S_DRV[@]}"; do for d in "${nots[@]}"; do xcl "${S_DRV[$i]}" "$(esc "${S_REL[$i]}/$d")/"; done; done
       local picked; picked=$(ask_check "Steam libraries found" "Copy $what from these libraries:" "${items[@]}") || exit 1
       while IFS= read -r i; do
         [ -n "$i" ] || continue
@@ -834,9 +839,8 @@ Leave everything unticked to copy those folders whole." "${items[@]}") || exit 1
     local dest="$DST/${DRV_PREFIX[$i]}" est="$WORK/est_$i"
     [ -d "$dest" ] || dest="$WORK/empty_$i/"; mkdir -p "$dest"
     echo "  ${DRV_NAME[$i]}: $(tr '\n' ' ' <<<"${DRV_WANT[$i]}" | cut -c1-150)"
-    rs "${RS_BASE[@]}" -n --stats --debug=FILTER --exclude-from="$EXC_USED" --filter="merge $WORK/filter_$i" \
-      "${DRV_ROOT[$i]}/" "$dest/" >"$est" 2>>"$ERRLOG"
-    local src_rc=$?
+    rs "${RS_BASE[@]}" -n --stats --debug=FILTER --out-format='%l %n' --exclude-from="$EXC_USED" --filter="merge $WORK/filter_$i" \
+      "${DRV_ROOT[$i]}/" "$dest/" >"$est" 2>>"$ERRLOG"; local src_rc=$?
     if [ "$src_rc" != 0 ] && [ "$src_rc" != 23 ] && [ "$src_rc" != 24 ]; then
       ask_msg "Scan failed" "rsync could not read ${DRV_NAME[$i]} (${DRV_ROOT[$i]}), exit code $src_rc:
 
@@ -872,39 +876,156 @@ Nothing will be copied. Diagnostics: ${DIAG:-$WORK}"
     exit 1
   fi
 
-  local EXCL_TXT="" EXCL_TOTAL=0
-  if [ "$EXCL_SUMMARY" = 1 ] && [ -s "$HIDDEN" ]; then
-    echo "Sizing excluded junk folders..."
-    local out; out=$(python3 -c "$PY_EXCL" "$HIDDEN" "$WORK/excluded_summary.txt" 40)
-    EXCL_TOTAL=$(head -1 <<<"$out"); EXCL_TXT=$(tail -n +2 <<<"$out")
+  # ---- 9b. sizes, size browser, confirm ----
+  local BROWSE_XCL="$WORK/browse_xcl.tsv"; : >"$BROWSE_XCL"   # drive-name<TAB>relpath<TAB>d|f
+  # exclusions made in the size browser last time (saved in prefs) are applied again
+  local sv_bx; sv_bx=$(saved "Browser exclusions")
+  if [ -n "$sv_bx" ]; then
+    local e; while IFS= read -r e; do
+      [ -n "$e" ] || continue; printf '%s\t%s\t%s\n' "${e%%|*}" "$(cut -d'|' -f2 <<<"$e")" "${e##*|}" >>"$BROWSE_XCL"
+    done < <(tr ';' '\n' <<<"$sv_bx")
   fi
+  local BASE_SEL=(); for i in "${!DRV_ROOT[@]}"; do BASE_SEL[$i]=${EST_SEL[$i]:-0}; done
+  local BIG_TXT="" FREE SUMMARY EXCL_TXT="" EXCL_TOTAL=0
+  FREE=$(df -B1 --output=avail "$DSTROOT" 2>/dev/null | tail -1); FREE=${FREE:-0}
 
-  local SUMMARY
-  SUMMARY="Source:        ${SRC_DEV:-$SRC} $( [ -n "$SRC_DEV" ] && printf '"%s"' "$(part_label "$SRC_DEV")" ) (read-only)
+  # compute_sizes: totals + per-folder breakdown from the dry-run file lists, minus browser exclusions
+  compute_sizes() {
+    local i r; : >"$WORK/sizes.tsv"; TOT_XFER=0; TOT_SEL=0; TOT_N=0
+    for i in "${!DRV_ROOT[@]}"; do
+      [ -n "${DRV_WANT[$i]}" ] || continue
+      r=$(awk -v drv="${DRV_NAME[$i]}" -v xf="$BROWSE_XCL" -v out="$WORK/sizes.tsv" '
+        BEGIN { nx=0; while ((getline l < xf) > 0) { split(l, f, "\t"); if (f[1]==drv) { nx++; xp[nx]=f[2]; xt[nx]=f[3] } } }
+        /^[0-9]+ / && !/\/$/ {
+          sz=$1+0; p=substr($0, length($1)+2)
+          for (j=1; j<=nx; j++) {
+            if (xt[j]=="d") { if (substr(p, 1, length(xp[j])+1) == xp[j] "/") { ex+=sz; next } }
+            else if (p==xp[j]) { ex+=sz; next } }
+          tot+=sz; cnt++; n=split(p, a, "/"); t1[a[1]]+=sz; if (n>2) t2[a[1] "\\" a[2]]+=sz; else t2[a[1]]+=sz }
+        END { for (k in t1) printf "1\t%d\t%s:\\%s\n", t1[k], drv, k >> out
+              for (k in t2) printf "2\t%d\t%s:\\%s\n", t2[k], drv, k >> out
+              printf "%d %d %d\n", tot+0, ex+0, cnt+0 }' "$WORK/est_$i")
+      read -r "EST_XFER[$i]" e "EST_NFILES[$i]" <<<"$r"   # quoted: nullglob would eat EST_XFER[0] as a glob
+      EST_SEL[$i]=$(( BASE_SEL[i] - e )); [ "${EST_SEL[$i]}" -lt 0 ] && EST_SEL[$i]=0
+      TOT_XFER=$((TOT_XFER + EST_XFER[i])); TOT_SEL=$((TOT_SEL + EST_SEL[i])); TOT_N=$((TOT_N + EST_NFILES[i]))
+    done
+    { echo "Size of what will be copied, by folder (largest first)"; echo
+      echo "--- top-level ---"; awk -F'\t' '$1==1' "$WORK/sizes.tsv" | sort -t$'\t' -k2,2nr | while IFS=$'\t' read -r _ b n; do printf '%10s  %s\n' "$(hr "$b")" "$n"; done
+      echo; echo "--- second level (top 60) ---"; awk -F'\t' '$1==2' "$WORK/sizes.tsv" | sort -t$'\t' -k2,2nr | head -60 | while IFS=$'\t' read -r _ b n; do printf '%10s  %s\n' "$(hr "$b")" "$n"; done
+    } >"$WORK/size_breakdown.txt"
+    BIG_TXT=$(awk -F'\t' '$1==2' "$WORK/sizes.tsv" | sort -t$'\t' -k2,2nr | head -10 | while IFS=$'\t' read -r _ b n; do printf '%9s  %s\n' "$(hr "$b")" "$n"; done)
+  }
+  build_summary() {
+    local bx=""; [ -s "$BROWSE_XCL" ] && bx="
+Excluded in the size browser: $(grep -c . "$BROWSE_XCL") item(s)"
+    SUMMARY="Source:        ${SRC_DEV:-$SRC} $( [ -n "$SRC_DEV" ] && printf '"%s"' "$(part_label "$SRC_DEV")" ) (read-only)
 Destination:   ${DST_DEV:-} $DST$( [ "$RESUMED" = 1 ] && echo '   [RESUMING]' )
 Users:         ${USERS[*]:-(none)}
-Categories:    $(tr '\n' ' ' <<<"$CATS")
+Categories:    $(tr '\n' ' ' <<<"$CATS")$bx
 
 Selected data:      $(hr "$TOT_SEL")
 Already there:      $(hr $((TOT_SEL - TOT_XFER)))
 To copy now:        $(hr "$TOT_XFER")  ($TOT_N files)
 Excluded junk:      $(hr "$EXCL_TOTAL")  (full list: _excluded_summary.txt)
-Free on dest:       $(hr "$FREE")${VHDX_NOTE:+
+Free on dest:       $(hr "$FREE")   $( [ "$TOT_XFER" -ge "$FREE" ] && echo '<-- NOT ENOUGH SPACE' )
+
+Biggest folders in the copy (full list: _size_breakdown.txt):
+${BIG_TXT:-(none)}${VHDX_NOTE:+
 
 $VHDX_NOTE}"
-  if [ "$TOT_XFER" -ge "$FREE" ]; then
-    ask_msg "Not enough space" "$SUMMARY
+  }
+  # is_bx drive rel -> 0 if that exact path is excluded in the browser
+  is_bx() { grep -qF -- "$1"$'\t'"$2"$'\t' "$BROWSE_XCL"; }
+  bx_toggle() {  # drive rel d|f : add or remove a browser exclusion
+    if is_bx "$1" "$2"; then grep -vF -- "$1"$'\t'"$2"$'\t' "$BROWSE_XCL" >"$BROWSE_XCL.tmp"; mv "$BROWSE_XCL.tmp" "$BROWSE_XCL"
+    else printf '%s\t%s\t%s\n' "$1" "$2" "$3" >>"$BROWSE_XCL"; fi
+  }
+  # size_browser drive-index: WinDirStat-style walk of what would be copied, largest first
+  size_browser() {
+    local i=$1 rel="" b n t tag act mark items est="$WORK/est_$i"
+    NOPREF=1
+    while :; do
+      items=()
+      [ -n "$rel" ] && items+=("<up" "..  (back up one level)")
+      while IFS=$'\t' read -r b n t; do
+        mark=""; is_bx "${DRV_NAME[$i]}" "${rel:+$rel/}$n" && mark="  EXCLUDED"
+        items+=("$n" "$(printf '%9s' "$(hr "$b")")  $( [ "$t" = d ] && echo '[folder]' || echo '[file]  ' )$mark")
+      done < <(awk -v pre="$rel" 'BEGIN { pl=length(pre) }
+        /^[0-9]+ / && !/\/$/ {
+          sz=$1+0; p=substr($0, length($1)+2)
+          if (pl) { if (substr(p, 1, pl+1) != pre "/") next; p=substr(p, pl+2) }
+          k=index(p, "/"); if (k) { nm=substr(p, 1, k-1); ty="d" } else { nm=p; ty="f" }
+          s[nm]+=sz; T[nm]=ty }
+        END { for (nm in s) printf "%d\t%s\t%s\n", s[nm], nm, T[nm] }' "$est" | sort -t$'\t' -k1,1nr | head -80)
+      items+=("<done" "Finish browsing")
+      tag=$(ask_menu "Size browser  ${DRV_NAME[$i]}:\\${rel//\//\\}" "Largest first, sizes are what would be copied (junk already removed). Pick an item to open or exclude it." "${items[@]}") || { NOPREF=""; return; }
+      case "$tag" in
+        "<done") NOPREF=""; return;;
+        "<up") if [[ "$rel" == */* ]]; then rel=${rel%/*}; else rel=""; fi; continue;;
+      esac
+      local p="${rel:+$rel/}$tag" isdir=0
+      grep -q "^[0-9]* $p/" "$est" && isdir=1
+      if is_bx "${DRV_NAME[$i]}" "$p"; then
+        act=$(ask_menu "$tag" "This item is currently EXCLUDED." include "Put it back into the backup" back "Back") || continue
+        [ "$act" = include ] && bx_toggle "${DRV_NAME[$i]}" "$p" d
+      elif [ "$isdir" = 1 ]; then
+        act=$(ask_menu "$tag" "Folder ${DRV_NAME[$i]}:\\${p//\//\\}" open "Open (look inside)" exclude "EXCLUDE this folder from the backup" back "Back") || continue
+        case "$act" in open) rel=$p;; exclude) bx_toggle "${DRV_NAME[$i]}" "$p" d;; esac
+      else
+        act=$(ask_menu "$tag" "File ${DRV_NAME[$i]}:\\${p//\//\\}" exclude "EXCLUDE this file from the backup" back "Back") || continue
+        [ "$act" = exclude ] && bx_toggle "${DRV_NAME[$i]}" "$p" f
+      fi
+    done
+  }
 
-Not enough free space on the destination. Untick categories or pick another drive."
-    [ "$DRY" = 1 ] || exit 1
+  if [ "$EXCL_SUMMARY" = 1 ] && [ -s "$HIDDEN" ]; then
+    echo "Sizing excluded junk folders..."
+    local out; out=$(python3 -c "$PY_EXCL" "$HIDDEN" "$WORK/excluded_summary.txt" 40)
+    EXCL_TOTAL=$(head -1 <<<"$out"); EXCL_TXT=$(tail -n +2 <<<"$out")
   fi
-  ask_yesno "Confirm" "$SUMMARY
+  compute_sizes
+  while :; do
+    build_summary
+    local c; c=$(ask_menu "Confirm" "$SUMMARY
 
-Largest excluded items:
+Largest excluded junk:
 ${EXCL_TXT:-(none)}
-
-$( [ "$DRY" = 1 ] && echo 'DRY RUN: nothing will be written. Continue?' || echo 'Start the copy?')" || exit 1
-  forget Confirm; forget "Folder exists"; save_prefs
+$( [ "$DRY" = 1 ] && echo 'DRY RUN: nothing will be written.' )" \
+      start  "$( [ "$DRY" = 1 ] && echo 'Continue (dry run)' || echo 'START the copy' )" \
+      browse "Browse sizes largest-first and exclude things (like WinDirStat)" \
+      cancel "Quit without copying") || exit 1
+    [ "$c" = yes ] && c=start
+    case "$c" in
+      start)
+        if [ "$TOT_XFER" -ge "$FREE" ] && [ "$DRY" = 0 ]; then ask_msg "Not enough space" "Not enough free space on the destination ($(hr "$TOT_XFER") needed, $(hr "$FREE") free). Exclude more in the size browser or pick another drive."; continue; fi
+        break;;
+      browse)
+        local bi=0
+        if [ ${#DRV_ROOT[@]} -gt 1 ]; then
+          items=(); for i in "${!DRV_ROOT[@]}"; do [ -n "${DRV_WANT[$i]}" ] && items+=("$i" "${DRV_NAME[$i]}  $(hr "${EST_XFER[$i]}")"); done
+          NOPREF=1; bi=$(ask_menu "Size browser" "Which drive?" "${items[@]}") || { NOPREF=""; continue; }; NOPREF=""
+        fi
+        size_browser "$bi"; compute_sizes;;
+      cancel) exit 1;;
+    esac
+  done
+  forget Confirm; forget "Folder exists"
+  # browser exclusions become explicit rsync rules and are saved with the preferences
+  if [ -s "$BROWSE_XCL" ]; then
+    local bxd bxp bxt bxs=""
+    while IFS=$'\t' read -r bxd bxp bxt; do
+      for i in "${!DRV_ROOT[@]}"; do
+        [ "${DRV_NAME[$i]}" = "$bxd" ] || continue
+        if [ "$bxt" = d ]; then xcl "$i" "$(esc "$bxp")/"; else xcl "$i" "$(esc "$bxp")"; fi
+        gen_filter "$i"
+      done
+      bxs+="${bxs:+;}$bxd|$bxp|$bxt"
+    done <"$BROWSE_XCL"
+    remember "Browser exclusions" "$bxs"
+  else
+    remember "Browser exclusions" ""
+  fi
+  save_prefs
 
   # ---- 10. copy ----
   local ZIP=no
@@ -916,6 +1037,7 @@ $( [ "$DRY" = 1 ] && echo 'DRY RUN: nothing will be written. Continue?' || echo 
     ERRLOG="$DST/_errors.log"; cp "$WORK/errors.log" "$ERRLOG" 2>/dev/null || : >"$ERRLOG"
     cp "$EXC_USED" "$DST/_excludes_used.txt"
     [ -f "$WORK/excluded_summary.txt" ] && cp "$WORK/excluded_summary.txt" "$DST/_excluded_summary.txt"
+    [ -f "$WORK/size_breakdown.txt" ] && cp "$WORK/size_breakdown.txt" "$DST/_size_breakdown.txt"
     [ "$RESUMED" = 1 ] || printf 'Started: %s\n' "$T_START" >"$DST/_summary.txt"
   fi
   clear 2>/dev/null
@@ -982,7 +1104,7 @@ Source:     ${SRC_DEV:-$SRC} $( [ -n "$SRC_DEV" ] && part_label "$SRC_DEV" )
 Users:      ${USERS[*]:-(none)}
 Categories: $(tr '\n' ' ' <<<"$CATS")
 Selected:   $(hr "$TOT_SEL")   copied this run: $(hr "$COPIED") in $NCOPIED files
-Excluded:   $(hr "$EXCL_TOTAL") of junk (see _excluded_summary.txt)
+Excluded:   $(hr "$EXCL_TOTAL") of junk (see _excluded_summary.txt); size-browser exclusions: $(grep -c . "$BROWSE_XCL" 2>/dev/null || echo 0)
 Errors:     $ERRN lines in _errors.log
 Verify:     $VRES
 On disk:    $(hr "$MAN_B") in $MAN_N files (_manifest.tsv)

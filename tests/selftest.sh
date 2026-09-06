@@ -307,6 +307,63 @@ absent "$D5/WinBackup_$DATE/Drive_Data/PoolPart.zzz"
 absent "$D5/WinBackup_$DATE/Drive_Data/Windows"
 rm -rf "$X/PoolPart.zzz" "$X/Windows"
 
+echo "=== run 4c: Steam games unticked stay out even though Program Files (x86) is copied whole"
+D7=$T/dst7; mkdir -p "$D7"
+cat >"$T/a4c" <<A
+/
+@default
+bob
+docs;steam;root
+@all
+@default
+
+yes
+no
+skip
+A
+WB_PREFS=$T/prefs4c bash "$SCRIPT" --src "$S" --dst "$D7" --answers "$T/a4c" >"$T/out4c" 2>"$T/err4c"; rc=$?
+[ $rc = 0 ] && ok || { fail "run 4c exit $rc"; tail -20 "$T/err4c"; }
+exists "$D7/WinBackup_$DATE/Program Files (x86)/Steam/steam.exe"
+exists "$D7/WinBackup_$DATE/Program Files (x86)/Steam/userdata/1/remote/save"
+absent "$D7/WinBackup_$DATE/Program Files (x86)/Steam/steamapps"
+exists "$D7/WinBackup_$DATE/_size_breakdown.txt"
+grep -q 'C:\\Users\\bob' "$D7/WinBackup_$DATE/_size_breakdown.txt" && ok || { fail "size breakdown lacks Users\\bob"; head "$D7/WinBackup_$DATE/_size_breakdown.txt"; }
+
+echo "=== run 4d: size browser excludes a folder; exclusion is saved and reused in auto mode"
+D8=$T/dst8; mkdir -p "$D8"
+cat >"$T/a4d" <<A
+/
+@default
+bob
+docs;root
+@default
+
+browse
+Apps
+open
+World of Warcraft
+exclude
+<up
+<done
+start
+no
+skip
+A
+WB_PREFS=$T/prefs4d bash "$SCRIPT" --src "$S" --dst "$D8" --answers "$T/a4d" >"$T/out4d" 2>"$T/err4d"; rc=$?
+[ $rc = 0 ] && ok || { fail "run 4d exit $rc"; tail -20 "$T/err4d"; }
+absent "$D8/WinBackup_$DATE/Apps/World of Warcraft"
+exists "$D8/WinBackup_$DATE/Apps/Other Game/keep.exe"
+exists "$D8/WinBackup_$DATE/Users/bob/Documents/report.docx"
+grep -q $'^Browser exclusions\tC|Apps/World of Warcraft|d$' "$T/prefs4d" && ok || { fail "browser exclusion not saved"; cat "$T/prefs4d"; }
+grep -q 'Size browser' "$T/prefs4d" && fail "browser menus leaked into prefs" || ok
+D9=$T/dst9; mkdir -p "$D9"
+printf 'auto\nstart\n' >"$T/a4e"
+WB_PREFS=$T/prefs4d bash "$SCRIPT" --src "$S" --dst "$D9" --answers "$T/a4e" >"$T/out4e" 2>"$T/err4e"; rc=$?
+[ $rc = 0 ] && ok || { fail "run 4e exit $rc"; tail -20 "$T/err4e"; }
+absent "$D9/WinBackup_$DATE/Apps/World of Warcraft"
+exists "$D9/WinBackup_$DATE/Apps/Other Game/keep.exe"
+grep -q 'size-browser exclusions: 1' "$D9/WinBackup_$DATE/_summary.txt" && ok || fail "summary does not mention browser exclusion"
+
 echo "=== run 5: restore into a fresh Windows drive, mapping bob -> ryan"
 W=$T/newwin; mk "$W/Users/ryan/Desktop/existing.txt" "keep"; mk "$W/Windows/x"
 cat >"$T/a5" <<A
