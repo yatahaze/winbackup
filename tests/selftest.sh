@@ -46,6 +46,10 @@ mk "$S/Users/bob/AppData/Local/NVIDIA/DXCache/x"
 mk "$S/Users/bob/AppData/LocalLow/Unity/Game/save.dat" "unity"
 mk "$S/Users/bob/AppData/Local/Packages/46932SUSE.openSUSELeap15.6_022rs5jcyhyac/LocalState/ext4.vhdx" "wsl-disk"
 mk "$S/Users/bob/AppData/Local/wsl/{1234}/ext4.vhdx" "wsl-disk2"
+mkdir -p "$S/Users/bob/AppData/Local/BigApp/data" "$S/Users/bob/AppData/Local/BigApp/Cache"
+for n in $(seq 1 600); do printf 'f%s' "$n" >"$S/Users/bob/AppData/Local/BigApp/data/file$n.dat"; done
+printf 'junk' >"$S/Users/bob/AppData/Local/BigApp/Cache/c"
+printf 'cfg' >"$S/Users/bob/AppData/Local/BigApp/settings.ini"
 mk "$S/Users/Alice Smith/Documents/notes [v2].txt" "brackets in a name"
 mk "$S/Users/Alice Smith/AppData/Roaming/App/x"
 mk "$S/Users/Public/Documents/shared.txt"
@@ -146,6 +150,8 @@ absent "$B/Users/bob/AppData/Local/Packages/MSTeams_8wekyb3d8bbwe/LocalCache"
 exists "$B/Users/bob/AppData/Local/Packages/MSTeams_8wekyb3d8bbwe/LocalState/keep"
 absent "$B/Users/bob/AppData/Local/NVIDIA"
 exists "$B/Users/bob/AppData/LocalLow/Unity/Game/save.dat"
+exists "$B/Users/bob/AppData/Local/BigApp/data/file600.dat"
+absent "$B/Users/bob/AppData/Local/BigApp.zip"
 exists "$B/Users/bob/AppData/Local/Packages/46932SUSE.openSUSELeap15.6_022rs5jcyhyac/LocalState/ext4.vhdx"
 exists "$B/Users/bob/AppData/Local/wsl/{1234}/ext4.vhdx"
 grep -q 'INCLUDED' "$B/_summary.txt" && grep -q 'openSUSELeap15.6.*ext4.vhdx' "$B/_summary.txt" && ok || { fail "WSL disk not reported in summary"; grep -i wsl "$B/_summary.txt"; }
@@ -211,7 +217,7 @@ exists "$B6.zip"
 grep -q '^Verify:     OK' "$B6/_summary.txt" && ok || fail "saved verify choice not applied"
 cmp -s "$B/_manifest.tsv" "$B6/_manifest.tsv" && ok || { fail "parallel copy manifest differs from single-rsync copy"; diff "$B/_manifest.tsv" "$B6/_manifest.tsv" | head; }
 grep -q 'parallel workers' "$T/out1c" && ok || fail "parallel mode not used"
-grep -q 'copied this run: 38.2MB in 30 files' "$B6/_summary.txt" && ok || { fail "parallel stats not summed"; grep 'copied this run' "$B6/_summary.txt"; }
+grep -q 'copied this run: 38.2MB in 631 files' "$B6/_summary.txt" && ok || { fail "parallel stats not summed"; grep 'copied this run' "$B6/_summary.txt"; }
 grep -c '(saved)' "$T/err1c" | grep -q '^[0-9]' && ok
 
 echo "=== run 2: resume after a simulated crash (adds one file; a corrupted file and an rsync temp file are left behind)"
@@ -402,6 +408,43 @@ WB_PREFS=$T/prefs4f bash "$SCRIPT" --src "$S" --dst "$D10" --answers "$T/a4f" >"
 [ $rc = 1 ] && ok || fail "run 4f should exit 1 on cancel (got $rc)"
 grep -q $'^What to back up\tdocs;steam$' "$T/prefs4f" && ok || { fail "answers not saved on cancel"; cat "$T/prefs4f" 2>/dev/null; }
 grep -q $'^Steam libraries found\t' "$T/prefs4f" && ok || fail "steam choice not saved on cancel"
+
+echo "=== run 4g: packing small-file folders into .zip (--pack), then resume skips the finished zip"
+D11=$T/dst11; mkdir -p "$D11"
+printf '/\n@default\nbob\ndocs;local\nstart\nno\nquick\n' >"$T/a4g"
+WB_PREFS=$T/prefs4g bash "$SCRIPT" --pack --src "$S" --dst "$D11" --answers "$T/a4g" >"$T/out4g" 2>"$T/err4g"; rc=$?
+[ $rc = 0 ] && ok || { fail "run 4g exit $rc"; tail -20 "$T/err4g"; }
+B11=$D11/WinBackup_$DATE
+exists "$B11/Users/bob/AppData/Local/BigApp.zip"
+absent "$B11/Users/bob/AppData/Local/BigApp"
+absent "$B11/Users/bob/AppData/Local/BigApp.zip.part"
+exists "$B11/Users/bob/AppData/Local/Google/Chrome/User Data/Default/History"
+exists "$B11/Users/bob/Documents/report.docx"
+python3 - "$B11/Users/bob/AppData/Local/BigApp.zip" <<'PY' && ok || fail "zip content wrong"
+import sys, zipfile
+z = zipfile.ZipFile(sys.argv[1]); n = z.namelist()
+assert 'BigApp/data/file600.dat' in n and 'BigApp/settings.ini' in n, n[:5]
+assert not any('Cache' in x for x in n), [x for x in n if 'Cache' in x]
+assert len([x for x in n if not x.endswith('/')]) == 601, len(n)
+assert z.testzip() is None
+PY
+grep -q 'Users/bob/AppData/Local/BigApp.zip' "$B11/_packed.txt" && ok || fail "_packed.txt missing"
+grep -q $'\tUsers/bob/AppData/Local/BigApp/data/file1.dat\tin ' "$B11/_manifest.tsv" && ok || { fail "manifest lacks zip members"; grep -c BigApp "$B11/_manifest.tsv"; }
+grep -q '^Verify:     OK' "$B11/_summary.txt" && ok || { fail "verify with packing not OK"; cat "$B11/_verify.log"; }
+grep -q 'copied this run: .* in 6[0-9][0-9] files' "$B11/_summary.txt" && ok || { fail "pack stats not counted"; grep 'copied this run' "$B11/_summary.txt"; }
+printf 'fresh\n/\n@default\nyes\nbob\ndocs;local\nstart\nno\nskip\n' >"$T/a4h"
+WB_PREFS=$T/prefs4g bash "$SCRIPT" --pack --src "$S" --dst "$D11" --answers "$T/a4h" >"$T/out4h" 2>"$T/err4h"; rc=$?
+[ $rc = 0 ] && ok || { fail "run 4h exit $rc"; tail -20 "$T/err4h"; }
+grep -q 'already complete, skipped' "$T/out4h" && ok || fail "resume rebuilt the zip"
+grep -q 'copied this run: 0.0B in 0 files' "$B11/_summary.txt" && ok || { fail "resume with packs copied something"; grep 'copied this run' "$B11/_summary.txt" | tail -1; }
+W2=$T/newwin2; mk "$W2/Windows/x"; mkdir -p "$W2/Users/carol"
+printf 'WinBackup_%s\n@all\ncarol\noverwrite\nyes\n' "$DATE" >"$T/a4i"
+WB_PREFS=$T/prefs4i bash "$SCRIPT" --restore --src "$D11" --dst "$W2" --answers "$T/a4i" >"$T/out4i" 2>"$T/err4i"; rc=$?
+[ $rc = 0 ] && ok || { fail "run 4i exit $rc"; tail -20 "$T/err4i"; }
+exists "$W2/Users/carol/AppData/Local/BigApp/data/file600.dat"
+exists "$W2/Users/carol/AppData/Local/BigApp/settings.ini"
+absent "$W2/Users/carol/AppData/Local/BigApp.zip"
+exists "$W2/Users/carol/Documents/report.docx"
 
 echo "=== run 5: restore into a fresh Windows drive, mapping bob -> carol"
 W=$T/newwin; mk "$W/Users/carol/Desktop/existing.txt" "keep"; mk "$W/Windows/x"

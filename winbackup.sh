@@ -7,6 +7,8 @@
 #   sudo bash winbackup.sh --other-drives  also mount the other NTFS drives read-only and offer their folders
 #                                          and Steam libraries (default: only the one source drive is touched)
 #   sudo bash winbackup.sh --jobs N        number of rsync workers for the "parallel" start option (default 4)
+#   sudo bash winbackup.sh --pack|--no-pack  force packing of small-file folders into .zip on/off
+#                                          (default: on when the destination is a spinning disk)
 #   sudo bash winbackup.sh --src DIR --dst DIR [--extra DIR]...
 #                                          use already-mounted directories instead of picking partitions
 #   bash winbackup.sh --answers FILE ...   scripted mode: read menu answers from FILE (used by tests/selftest.sh)
@@ -33,7 +35,7 @@ cd / || exit 1   # never keep a cwd on a drive we may unmount; rsync aborts if g
 VERSION="2.0"
 
 # ---------------------------------------------------------------- args
-DRY=0; MODE=backup; SRC_OVERRIDE=""; DST_OVERRIDE=""; EXTRA_OVERRIDES=(); ANSWERS=""; EXCL_SUMMARY=1; OTHER=0; JOBS=4; PARALLEL=0
+DRY=0; MODE=backup; SRC_OVERRIDE=""; DST_OVERRIDE=""; EXTRA_OVERRIDES=(); ANSWERS=""; EXCL_SUMMARY=1; OTHER=0; JOBS=4; PARALLEL=0; PACK=auto
 usage() { sed -n '2,12p' "$0" | sed 's/^# \{0,1\}//'; }
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -44,6 +46,8 @@ while [ $# -gt 0 ]; do
     --extra) EXTRA_OVERRIDES+=("$2"); OTHER=1; shift;;
     --other-drives) OTHER=1;;
     --jobs) JOBS=$2; shift;;
+    --pack) PACK=1;;
+    --no-pack) PACK=0;;
     --answers) ANSWERS=$2; shift;;
     --no-excluded-summary) EXCL_SUMMARY=0;;
     -h|--help) usage; exit 0;;
@@ -216,6 +220,10 @@ ask_yesno() {  # title text [--defaultno] -> 0 yes / 1 no
   fi
   remember "$1" "$a"; [ "$a" = yes ]
 }
+ask_password() {  # title text -> string (never remembered)
+  if [ -n "$ANSWERS" ]; then next_answer; return; fi
+  whiptail --title "$1" --passwordbox "$2" "$(dlg_h $(( 8 + $(text_lines "$2") )))" 80 3>&1 1>&2 2>&3
+}
 ask_msg() {    # title text
   if [ -n "$ANSWERS" ]; then printf '\n[%s]\n%s\n' "$1" "$2" >&2; return; fi
   whiptail --title "$1" --scrolltext --msgbox "$2" "$(dlg_h $(( 6 + $(text_lines "$2") )))" 90
@@ -267,6 +275,7 @@ pick_part() {
     [ -n "$mp" ] && desc="$desc  [mounted: $mp]"
     items+=("$dev" "$desc")
   done < <(list_parts "$3")
+  [ -n "${5:-}" ] && items+=("__net__" "Network share: NAS over SMB (free space shown after connecting)")
   [ ${#items[@]} -gt 0 ] || { ask_msg "No partitions" "No suitable partitions found (looked for: $3).\nIs the drive plugged in? Check with: lsblk -f"; return 1; }
   local sv; sv=$(saved "part:$1")
   if [ -n "$sv" ]; then
@@ -275,9 +284,11 @@ pick_part() {
     while IFS='|' read -r dev fs size label mp; do
       if { [ -n "$slabel" ] && [ "$label" = "$slabel" ] && [ "$size" = "$ssize" ]; } || { [ -z "$slabel" ] && [ "$dev" = "$sdev" ] && [ "$size" = "$ssize" ]; }; then ASK_DEFAULT=$dev; break; fi
     done < <(list_parts "$3")
+    [ "$sdev" = "__net__" ] && ASK_DEFAULT="__net__"
     [ -n "$ASK_DEFAULT" ] || { note "Saved drive for '$1' ($slabel $ssize) not found; asking."; PREF[$1]=""; }
   fi
   dev=$(ask_menu "$1" "$2" "${items[@]}") || return 1
+  if [ "$dev" = "__net__" ]; then remember "part:$1" "__net__||"; forget "$1"; echo "__net__"; return 0; fi
   local pl ps; pl=$(part_label "$dev"); ps=$(lsblk -no SIZE "$dev" 2>/dev/null | head -1)
   remember "part:$1" "$dev|$pl|$ps"; forget "$1"
   printf '%s\n' "$dev"
@@ -357,6 +368,23 @@ mount_rw() {
     fi
   fi
   OUR_MOUNTS+=("$mp"); OUR_DEVS+=("$dev"); echo "$mp"
+}
+
+# mount_smb //server/share user password mountpoint -> prints mountpoint. Tries SMB 3.1.1, 3.0, 2.1.
+# Credentials go through a root-only temp file (never on the command line). Works with the kernel
+# cifs module alone when the address is an IP; mount.cifs (cifs-utils) adds name resolution.
+mount_smb() {
+  local share=$1 user=$2 pw=$3 mp=$4 v cred="$WORK/cifs.cred"
+  mkdir -p "$mp"; ( umask 077; printf 'username=%s\npassword=%s\n' "$user" "$pw" >"$cred" )
+  for v in 3.1.1 3.0 2.1; do
+    echo "$(now) mount -t cifs -o vers=$v,username=$user $share $mp" >>"$WORK/mount.log"
+    if mount -t cifs -o "vers=$v,credentials=$cred,uid=0,gid=0,file_mode=0644,dir_mode=0755,iocharset=utf8,noperm" "$share" "$mp" >>"$WORK/mount.log" 2>&1 \
+       || mount -t cifs -o "vers=$v,username=$user,password=$pw,uid=0,gid=0,file_mode=0644,dir_mode=0755,iocharset=utf8,noperm" "$share" "$mp" >>"$WORK/mount.log" 2>&1; then
+      rm -f "$cred"
+      OUR_MOUNTS+=("$mp"); OUR_DEVS+=(""); echo "$mp"; return 0
+    fi
+  done
+  rm -f "$cred"; return 1
 }
 
 # resolve_ci base relpath -> base/relpath with each existing component matched case-insensitively
@@ -581,6 +609,7 @@ gen_filter() {
 
 # rsync options shared by estimate/copy/verify. No -l: junctions show up as symlinks, skip them.
 RS_BASE=(-r -t --no-perms --no-owner --no-group --modify-window=2 --partial --info=nonreg0)
+PACKX_OPT=()   # per-drive "--exclude-from=packx" while copying (folders that are packed as .zip instead)
 # rs: run rsync, recording the exact command line and exit code in $WORK/commands.log
 rs() { printf '%s rsync' "$(now)" >>"$WORK/commands.log"; printf ' %q' "$@" >>"$WORK/commands.log"; echo >>"$WORK/commands.log"
        rsync "$@"; local rc=$?; echo "  -> exit $rc" >>"$WORK/commands.log"; return $rc; }
@@ -730,7 +759,7 @@ copy_parallel() {
     [ -f "$WORK/wfilter_${i}_$w" ] || continue
     : >"$sdir/w$w.state"
     ( rs "${RS_BASE[@]}" --outbuf=N --info=progress2,name1 --stats $( [ "$DRY" = 1 ] && printf -- '--dry-run' ) \
-        --exclude-from="$EXC_USED" --filter="merge $WORK/wfilter_${i}_$w" "${DRV_ROOT[$i]}/" "$dest/" 2>>"$sdir/err$w" \
+        --exclude-from="$EXC_USED" "${PACKX_OPT[@]}" --filter="merge $WORK/wfilter_${i}_$w" "${DRV_ROOT[$i]}/" "$dest/" 2>>"$sdir/err$w" \
         | python3 -c "$PY_WORKER" "$sdir/w$w.state" "$sdir/stats$w"
       echo "${PIPESTATUS[0]}" >"$sdir/rc$w" ) &
     pids+=($!)
@@ -746,6 +775,166 @@ copy_parallel() {
     P_COPIED=$((P_COPIED + $(stat_num "$sdir/stats$w" 'Total transferred file size')))
     P_NCOPIED=$((P_NCOPIED + $(stat_num "$sdir/stats$w" 'Number of regular files transferred')))
   done
+}
+
+# ---------------------------------------------------------------- packing small-file folders
+# Hundreds of thousands of tiny files are what kill NTFS-over-FUSE and (especially) shingled SMR
+# hard drives: each file is several metadata writes plus a seek. Packing such folders into ONE
+# store-only .zip each turns that into a sequential stream (10x+ on SMR), and the zip still opens
+# in Windows Explorer. Rules (see PY_PACKPLAN): children of AppData\Local|Roaming|LocalLow with
+# >= PACK_MIN_APPDATA files, and any other folder 3-4 levels deep with >= PACK_MIN_OTHER files.
+PACK_MIN_APPDATA=${WB_PACK_MIN_APPDATA:-500}
+PACK_MIN_OTHER=${WB_PACK_MIN_OTHER:-50000}
+
+# write_unit_filter drive-index units-file out-file: rsync rules that select exactly those units
+write_unit_filter() {
+  local i=$1 uf=$2 f=$3 root=${DRV_ROOT[$1]} u p
+  declare -A leaf=() anc=()
+  : >"$f"
+  while IFS= read -r u; do [ -n "$u" ] && echo "- /$u" >>"$f"; done <<<"${DRV_XCL[$i]}"
+  while IFS= read -r u; do [ -n "$u" ] || continue; leaf[$u]=1; p=$u; while [[ "$p" == */* ]]; do p=${p%/*}; anc[$p]=1; done; done <"$uf"
+  for u in "${!leaf[@]}"; do if [ -d "$root/$u" ]; then echo "+ /$(esc "$u")/" >>"$f"; else echo "+ /$(esc "$u")" >>"$f"; fi; done
+  for u in "${!anc[@]}"; do [ -n "${leaf[$u]:-}" ] || echo "+ /$(esc "$u")/" >>"$f"; done
+  for u in "${!anc[@]}"; do [ -n "${leaf[$u]:-}" ] || echo "- /$(esc "$u")/*" >>"$f"; done
+  echo "- /*" >>"$f"
+}
+
+# Decide which folders get packed. Reads the dry-run file list, writes "dir<TAB>files<TAB>bytes<TAB>state".
+read -r -d '' PY_PACKPLAN <<'PY'
+import sys, os, zipfile, collections
+est, xclf, drv, dest, out, min_app, min_other = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[5], int(sys.argv[6]), int(sys.argv[7])
+xcl = []
+try:
+    for l in open(xclf, encoding='utf-8', errors='replace'):
+        f = l.rstrip('\n').split('\t')
+        if len(f) == 3 and f[0] == drv: xcl.append((f[1] + '/' if f[2] == 'd' else f[1], f[2]))
+except OSError: pass
+cnt, byt = collections.Counter(), collections.Counter()
+with open(est, encoding='utf-8', errors='replace') as f:
+    for line in f:
+        if not line[:1].isdigit() or line.rstrip('\n').endswith('/'): continue
+        sz, _, p = line.rstrip('\n').partition(' ')
+        if not sz.isdigit(): continue
+        if any((t == 'd' and p.startswith(x)) or (t == 'f' and p == x) for x, t in xcl): continue
+        parts = p.split('/')
+        for d in range(1, min(len(parts) - 1, 5) + 1):
+            k = '/'.join(parts[:d]); cnt[k] += 1; byt[k] += int(sz)
+picks = []
+for k in sorted(cnt):
+    parts = k.split('/')
+    if len(parts) == 5 and parts[0] == 'Users' and parts[2] == 'AppData' and parts[3] in ('Local', 'Roaming', 'LocalLow'):
+        if cnt[k] >= min_app: picks.append(k)
+    elif 3 <= len(parts) <= 4 and not (parts[0] == 'Users' and len(parts) > 2 and parts[2] == 'AppData'):
+        if cnt[k] >= min_other: picks.append(k)
+final = [k for k in picks if not any(k.startswith(o + '/') for o in picks if o != k)]
+with open(out, 'w') as f:
+    for k in final:
+        z = os.path.join(dest, k + '.zip'); state = 'todo'
+        if os.path.exists(z):
+            try:
+                with zipfile.ZipFile(z) as zz: state = 'done'
+            except Exception: state = 'todo'
+        f.write(f'{k}\t{cnt[k]}\t{byt[k]}\t{state}\n')
+PY
+
+# Stream the listed files into one store-only zip per pack folder. Resume: a zip that opens is skipped.
+read -r -d '' PY_PACK <<'PY'
+import sys, os, zipfile, time
+root, dest, listf, planf, statsf = sys.argv[1:6]
+plan = [l.rstrip('\n').split('\t') for l in open(planf, encoding='utf-8', errors='replace') if l.strip()]
+files = {}
+with open(listf, encoding='utf-8', errors='replace') as f:
+    for line in f:
+        if not line[:1].isdigit() or line.rstrip('\n').endswith('/'): continue
+        sz, _, p = line.rstrip('\n').partition(' ')
+        if sz.isdigit(): files.setdefault(p, int(sz))
+def hr(n):
+    for u in ('B','K','M','G','T'):
+        if n < 1024 or u == 'T': return f'{n:.1f}{u}' if u != 'B' else f'{int(n)}B'
+        n /= 1024
+tb = sum(int(b) for _, _, b, s in plan if s != 'done'); tf = sum(int(c) for _, c, _, s in plan if s != 'done')
+done_b = done_f = 0; packed_f = packed_b = 0; errs = 0; t0 = time.time(); n = 0
+for d, c, b, state in plan:
+    n += 1; z = os.path.join(dest, d + '.zip'); disp = d.replace('/', '\\')
+    if state == 'done':
+        print(f'   [pack {n}/{len(plan)}] {disp}.zip already complete, skipped'); continue
+    members = sorted(p for p in files if p.startswith(d + '/'))
+    os.makedirs(os.path.dirname(z), exist_ok=True)
+    part = z + '.part'; base = os.path.basename(d); k = 0; zb = 0; last = 0.0
+    with zipfile.ZipFile(part, 'w', compression=zipfile.ZIP_STORED, allowZip64=True) as zz:
+        for p in members:
+            src = os.path.join(root, p); arc = base + '/' + p[len(d) + 1:]
+            try: zz.write(src, arc)
+            except OSError as e:
+                errs += 1; print(f'pack: skipped {p}: {e}', file=sys.stderr); continue
+            k += 1; zb += files[p]
+            if time.time() - last > 0.3:
+                el = time.time() - t0; rate = (done_b + zb) / el if el > 0 else 0
+                rem = (tb - done_b - zb) / rate if rate > 0 else 0
+                sys.stdout.write(f'\r\x1b[2K   [pack {n}/{len(plan)}] {disp}.zip  {k}/{len(members)} files  {hr(zb)}   '
+                                 f'| all packs {hr(done_b + zb)}/{hr(tb)}  {hr(rate)}/s  ETA {int(rem//3600)}:{int(rem%3600//60):02d}:{int(rem%60):02d}')
+                sys.stdout.flush(); last = time.time()
+    os.replace(part, z); done_b += zb; done_f += k; packed_f += k; packed_b += zb
+    sys.stdout.write(f'\r\x1b[2K   [pack {n}/{len(plan)}] {disp}.zip  {k} files  {hr(zb)}  done\n'); sys.stdout.flush()
+with open(statsf, 'w') as f: f.write(f'Total transferred file size: {packed_b} bytes\nNumber of regular files transferred: {packed_f}\nErrors: {errs}\n')
+PY
+
+# Verify zips: quick = opens and member count matches the file list; full = CRC-read every member.
+read -r -d '' PY_PACKCHECK <<'PY'
+import sys, os, zipfile
+dest, planf, listf, mode = sys.argv[1:5]
+plan = [l.rstrip('\n').split('\t')[0] for l in open(planf, encoding='utf-8', errors='replace') if l.strip()]
+expect = {d: 0 for d in plan}
+for line in open(listf, encoding='utf-8', errors='replace'):
+    if line[:1].isdigit() and not line.rstrip('\n').endswith('/'):
+        p = line.rstrip('\n').partition(' ')[2]
+        for d in plan:
+            if p.startswith(d + '/'): expect[d] += 1; break
+bad = 0
+for d in plan:
+    z = os.path.join(dest, d + '.zip')
+    try:
+        with zipfile.ZipFile(z) as zz:
+            n = len(zz.namelist())
+            if mode == 'full':
+                r = zz.testzip()
+                if r is not None: print(f'zip CRC error in {d}.zip at {r}'); bad += 1; continue
+            if n < expect[d]: print(f'{d}.zip has {n} members, expected {expect[d]} (unreadable files are listed in _errors.log)'); bad += 1
+    except Exception as e: print(f'{d}.zip: {e}'); bad += 1
+sys.exit(1 if bad else 0)
+PY
+
+# Manifest lines for zip members: "size<TAB>logical path<TAB>in <zip>"
+read -r -d '' PY_PACKMANIFEST <<'PY'
+import sys, os, zipfile
+dest, planf = sys.argv[1], sys.argv[2]
+for line in open(planf, encoding='utf-8', errors='replace'):
+    if not line.strip(): continue
+    d = line.split('\t')[0]; z = os.path.join(dest, d + '.zip'); parent = os.path.dirname(d)
+    try:
+        with zipfile.ZipFile(z) as zz:
+            for i in zz.infolist():
+                if i.is_dir(): continue
+                print(f'{i.file_size}\t{(parent + "/" if parent else "") + i.filename}\tin {d}.zip')
+    except Exception as e: print(f'0\t{d}.zip\tUNREADABLE: {e}')
+PY
+
+# pack_drive i dest -> packs this drive's pack folders; sets PK_COPIED PK_NCOPIED
+pack_drive() {
+  local i=$1 dest=$2 plan="$WORK/packplan_$i"
+  PK_COPIED=0; PK_NCOPIED=0
+  [ -s "$plan" ] || return 0
+  cut -f1 "$plan" >"$WORK/packunits_$i"
+  write_unit_filter "$i" "$WORK/packunits_$i" "$WORK/packfilter_$i"
+  # complete file list for the pack folders (against an empty destination: the zip is always whole)
+  mkdir -p "$WORK/empty_pack"
+  rs "${RS_BASE[@]}" -n --out-format='%l %n' --exclude-from="$EXC_USED" --filter="merge $WORK/packfilter_$i" \
+     --filter="merge $WORK/filter_$i" "${DRV_ROOT[$i]}/" "$WORK/empty_pack/" >"$WORK/packlist_$i" 2>>"$ERRLOG"
+  [ "$DRY" = 1 ] && { echo "   (dry run) would pack $(wc -l <"$plan") folder(s)"; return 0; }
+  echo "== ${DRV_NAME[$i]}: packing $(wc -l <"$plan") small-file folder(s) into .zip"
+  python3 -c "$PY_PACK" "${DRV_ROOT[$i]}" "$dest" "$WORK/packlist_$i" "$plan" "$WORK/packstats_$i" 2>>"$ERRLOG"
+  PK_COPIED=$(stat_num "$WORK/packstats_$i" 'Total transferred file size')
+  PK_NCOPIED=$(stat_num "$WORK/packstats_$i" 'Number of regular files transferred')
 }
 
 # ================================================================= BACKUP
@@ -791,16 +980,56 @@ Rough guide: C: has $(hr "$WORST") in use; \\Windows (typically 25-40 GB) and ca
 so the backup is somewhat smaller. The exact size is shown before anything is copied." \
       'ntfs|exfat|vfat|ext4|ext3|xfs|btrfs' "$SRC_DEV" "$WORST") || exit 1
     [ "$DST_DEV" = "$SRC_DEV" ] && die "Source and destination are the same partition."
-    if [ "$DRY" = 1 ]; then
+    if [ "$DST_DEV" = "__net__" ]; then
+      local host user pw share
+      host=$(ask_input "NAS address" "IP address or host name of the NAS (Synology, etc.):" "192.168.1.") || exit 1
+      user=$(ask_input "NAS user" "User name on the NAS:" "admin") || exit 1
+      pw=$(ask_password "NAS password" "Password for $user on $host (never saved):") || exit 1
+      if ! command -v smbclient >/dev/null 2>&1 || ! command -v mount.cifs >/dev/null 2>&1; then
+        if ask_yesno "Install SMB tools" "smbclient / cifs-utils are not on this live system. Install them now? (needs internet, ~1 minute)"; then
+          apt-get update -qq >>"$WORK/mount.log" 2>&1; apt-get install -y -qq smbclient cifs-utils >>"$WORK/mount.log" 2>&1
+        fi
+      fi
+      items=()
+      if command -v smbclient >/dev/null 2>&1; then
+        echo "Listing shares on $host..."
+        while IFS='|' read -r kind name comment; do
+          [ "$kind" = Disk ] || continue; [[ "$name" == *\$ ]] && continue
+          items+=("$name" "${comment:-}")
+        done < <(smbclient -L "//$host" -U "$user%$pw" -g 2>>"$WORK/mount.log")
+      fi
+      if [ ${#items[@]} -gt 0 ]; then
+        items+=("__type__" "(type a share name)")
+        share=$(ask_menu "NAS share" "Shared folders on $host:" "${items[@]}") || exit 1
+      else share="__type__"; fi
+      [ "$share" = "__type__" ] && { share=$(ask_input "NAS share" "Name of the shared folder on $host:" "backup") || exit 1; }
+      share="//$host/${share#/}"
+      DSTROOT=$(mount_smb "$share" "$user" "$pw" "$MNT/nas") || { ask_msg "Mount failed" "Could not connect to $share as $user.
+$(mount_log_tail)"; exit 1; }
+      unset pw
+      DST_DEV=$share
+      note "Connected: $share -> $DSTROOT ($(hr "$(df -B1 --output=avail "$DSTROOT" | tail -1)") free)"
+    elif [ "$DRY" = 1 ]; then
       DSTROOT=$(mount_ro "$DST_DEV" "$MNT/dst") || { ask_msg "Mount failed" "Could not mount $DST_DEV.
 $(mount_log_tail)"; exit 1; }
     else
       DSTROOT=$(mount_rw "$DST_DEV" "$MNT/dst") || { ask_msg "Mount failed" "Could not mount $DST_DEV read-write.
 $(mount_log_tail)"; exit 1; }
     fi
-    [ "$(part_fstype "$DST_DEV")" = vfat ] && ask_msg "FAT32 destination" "Warning: $DST_DEV is FAT32, which cannot hold files over 4 GB. Such files will fail and be listed in _errors.log. exFAT or NTFS is better."
+    [ "$DST_DEV" = "${DST_DEV#//}" ] && [ "$(part_fstype "$DST_DEV")" = vfat ] && ask_msg "FAT32 destination" "Warning: $DST_DEV is FAT32, which cannot hold files over 4 GB. Such files will fail and be listed in _errors.log. exFAT or NTFS is better."
   fi
   case "$DSTROOT/" in "$SRC/"*) die "Destination is inside the source drive.";; esac
+  # packing default: on for spinning disks and network shares (small files are slow there), off for local SSDs
+  if [ "$PACK" = auto ] && [ -n "$(saved 'Pack small-file folders')" ]; then
+    [ "$(saved 'Pack small-file folders')" = yes ] && PACK=1 || PACK=0
+  fi
+  if [ "$PACK" = auto ]; then
+    PACK=0
+    if [ -n "$DST_DEV" ] && [ "$DST_DEV" != "${DST_DEV#//}" ]; then PACK=1
+    elif [ -n "$DST_DEV" ] && [ -b "$DST_DEV" ]; then
+      local rota; rota=$(lsblk -no ROTA "$DST_DEV" 2>/dev/null | head -1 | tr -d ' '); [ "$rota" = 1 ] && PACK=1
+    fi
+  fi
 
   # top-level folder on the destination (PoolPart.* folders are DrivePool's; hidden on Windows)
   local items=("/" "(drive root)") d n
@@ -1100,12 +1329,34 @@ Nothing will be copied. Diagnostics: ${DIAG:-$WORK}"
   local BIG_TXT="" FREE SUMMARY EXCL_TXT="" EXCL_TOTAL=0
   FREE=$(df -B1 --output=avail "$DSTROOT" 2>/dev/null | tail -1); FREE=${FREE:-0}
 
+  # plan_packs: decide which small-file folders become .zip files (see PY_PACKPLAN); writes per drive
+  # packplan_<i>, packx_<i> (rsync excludes) and collects already-complete zips as exclusions for sizing.
+  local PACK_TXT="" PACK_N=0 PACK_FILES=0 PACK_BYTES=0
+  plan_packs() {
+    local i d c b st; : >"$WORK/done_xcl.tsv"; PACK_TXT=""; PACK_N=0; PACK_FILES=0; PACK_BYTES=0; : >"$WORK/packs_all.txt"
+    for i in "${!DRV_ROOT[@]}"; do
+      rm -f "$WORK/packplan_$i" "$WORK/packx_$i"
+      [ "$PACK" = 1 ] && [ -n "${DRV_WANT[$i]}" ] || continue
+      python3 -c "$PY_PACKPLAN" "$WORK/est_$i" "$BROWSE_XCL" "${DRV_NAME[$i]}" "$DST/${DRV_PREFIX[$i]}" "$WORK/packplan_$i" "$PACK_MIN_APPDATA" "$PACK_MIN_OTHER"
+      [ -s "$WORK/packplan_$i" ] || { rm -f "$WORK/packplan_$i"; continue; }
+      while IFS=$'\t' read -r d c b st; do
+        echo "/$(esc "$d")/" >>"$WORK/packx_$i"
+        [ "$st" = done ] && printf '%s\t%s\td\n' "${DRV_NAME[$i]}" "$d" >>"$WORK/done_xcl.tsv"
+        PACK_N=$((PACK_N+1)); PACK_FILES=$((PACK_FILES+c)); PACK_BYTES=$((PACK_BYTES+b))
+        printf '%s\t%s\t%s\t%s\t%s\n' "$c" "$b" "${DRV_NAME[$i]}" "${DRV_PREFIX[$i]}$d.zip" "$st" >>"$WORK/packs_all.txt"
+      done <"$WORK/packplan_$i"
+    done
+    if [ "$PACK_N" -gt 0 ]; then
+      PACK_TXT=$(sort -t$'\t' -k1,1nr "$WORK/packs_all.txt" | head -8 | while IFS=$'\t' read -r c b dn z st; do printf '  %8s files %8s  %s:\\%s%s\n' "$c" "$(hr "$b")" "$dn" "${z//\//\\}" "$( [ "$st" = done ] && echo '  (already packed)' )"; done)
+    fi
+  }
   # compute_sizes: totals + per-folder breakdown from the dry-run file lists, minus browser exclusions
   compute_sizes() {
     local i r; : >"$WORK/sizes.tsv"; TOT_XFER=0; TOT_SEL=0; TOT_N=0
+    cat "$BROWSE_XCL" "$WORK/done_xcl.tsv" 2>/dev/null >"$WORK/all_xcl.tsv"
     for i in "${!DRV_ROOT[@]}"; do
       [ -n "${DRV_WANT[$i]}" ] || continue
-      r=$(awk -v drv="${DRV_NAME[$i]}" -v xf="$BROWSE_XCL" -v out="$WORK/sizes.tsv" '
+      r=$(awk -v drv="${DRV_NAME[$i]}" -v xf="$WORK/all_xcl.tsv" -v out="$WORK/sizes.tsv" '
         BEGIN { nx=0; while ((getline l < xf) > 0) { split(l, f, "\t"); if (f[1]==drv) { nx++; xp[nx]=f[2]; xt[nx]=f[3] } } }
         /^[0-9]+ / && !/\/$/ {
           sz=$1+0; p=substr($0, length($1)+2)
@@ -1150,6 +1401,8 @@ Already there:      $(hr $((TOT_SEL - TOT_XFER)))
 To copy now:        $(hr "$TOT_XFER")  ($TOT_N files)
 Excluded junk:      $(hr "$EXCL_TOTAL")  (full list: _excluded_summary.txt)
 Free on dest:       $(hr "$FREE")   $( [ "$TOT_XFER" -ge "$FREE" ] && echo '<-- NOT ENOUGH SPACE' )
+Packed as .zip:     $( [ "$PACK" = 1 ] && echo "$PACK_N folder(s), $PACK_FILES files, $(hr "$PACK_BYTES")  (small-file folders; opens in Explorer)" || echo 'off' )${PACK_TXT:+
+$PACK_TXT}
 $danger
 Biggest folders in the copy (full list: _size_breakdown.txt):
 ${BIG_TXT:-(none)}${VHDX_NOTE:+
@@ -1206,7 +1459,7 @@ $VHDX_NOTE}"
     local out; out=$(python3 -c "$PY_EXCL" "$HIDDEN" "$WORK/excluded_summary.txt" 40)
     EXCL_TOTAL=$(head -1 <<<"$out"); EXCL_TXT=$(tail -n +2 <<<"$out")
   fi
-  compute_sizes
+  plan_packs; compute_sizes
   while :; do
     build_summary
     local c; c=$(ask_menu "Confirm" "$SUMMARY
@@ -1217,6 +1470,7 @@ $( [ "$DRY" = 1 ] && echo 'DRY RUN: nothing will be written.' )" \
       start  "$( [ "$DRY" = 1 ] && echo 'Continue (dry run)' || echo 'START the copy' )" \
       startp "$( [ "$DRY" = 1 ] && echo 'Continue (dry run)' || echo 'START' ) with $JOBS parallel copies (faster on lots of small files; resume-safe)" \
       browse "Browse sizes largest-first and exclude things (like WinDirStat)" \
+      pack   "Packing of small-file folders into .zip is $( [ "$PACK" = 1 ] && echo ON || echo OFF ) - toggle (ON = much faster on HDD/SMR/NAS)" \
       cancel "Quit without copying") || exit 1
     [ "$c" = yes ] && c=start
     [ "$c" = startp ] && { c=start; PARALLEL=1; }
@@ -1230,7 +1484,8 @@ $( [ "$DRY" = 1 ] && echo 'DRY RUN: nothing will be written.' )" \
           items=(); for i in "${!DRV_ROOT[@]}"; do [ -n "${DRV_WANT[$i]}" ] && items+=("$i" "${DRV_NAME[$i]}  $(hr "${EST_XFER[$i]}")"); done
           NOPREF=1; bi=$(ask_menu "Size browser" "Which drive?" "${items[@]}") || { NOPREF=""; continue; }; NOPREF=""
         fi
-        size_browser "$bi"; compute_sizes;;
+        size_browser "$bi"; plan_packs; compute_sizes;;
+      pack) [ "$PACK" = 1 ] && PACK=0 || PACK=1; plan_packs; compute_sizes;;
       cancel) exit 1;;
     esac
   done
@@ -1250,6 +1505,7 @@ $( [ "$DRY" = 1 ] && echo 'DRY RUN: nothing will be written.' )" \
   else
     remember "Browser exclusions" ""
   fi
+  plan_packs; remember "Pack small-file folders" "$( [ "$PACK" = 1 ] && echo yes || echo no )"
   save_prefs
 
   # ---- 10. copy ----
@@ -1279,13 +1535,14 @@ $( [ "$DRY" = 1 ] && echo 'DRY RUN: nothing will be written.' )" \
     echo "== ${DRV_NAME[$i]}  ($(hr "${EST_XFER[$i]}") to copy)"
     [ "$DRY" = 1 ] || mkdir -p "$dest"
     echo "=== $(now) ${DRV_NAME[$i]} (${DRV_ROOT[$i]}) -> $dest" >>"$ERRLOG"
+    PACKX_OPT=(); [ "$PACK" = 1 ] && [ -s "$WORK/packx_$i" ] && PACKX_OPT=(--exclude-from="$WORK/packx_$i")
     if [ "$PARALLEL" = 1 ] && [ "$JOBS" -gt 1 ]; then
       copy_parallel "$i" "$dest" "$offset"; rc=$P_RC
       printf 'Total transferred file size: %s bytes\nNumber of regular files transferred: %s\n' "$P_COPIED" "$P_NCOPIED" >"$st"
     else
       rs "${RS_BASE[@]}" --outbuf=N --info=progress2,name1 --stats \
         $( [ "$DRY" = 1 ] && printf -- '--dry-run' ) \
-        --exclude-from="$EXC_USED" --filter="merge $WORK/filter_$i" "${DRV_ROOT[$i]}/" "$dest/" 2>>"$ERRLOG" \
+        --exclude-from="$EXC_USED" "${PACKX_OPT[@]}" --filter="merge $WORK/filter_$i" "${DRV_ROOT[$i]}/" "$dest/" 2>>"$ERRLOG" \
         | python3 -c "$PY_PROGRESS" "[${DRV_NAME[$i]}]" "$offset" "$TOT_XFER" "$st" "$TOT_N" "$foffset"
       rc=${PIPESTATUS[0]}
     fi
@@ -1296,8 +1553,12 @@ $( [ "$DRY" = 1 ] && echo 'DRY RUN: nothing will be written.' )" \
     esac
     COPIED=$((COPIED + $(stat_num "$st" 'Total transferred file size')))
     NCOPIED=$((NCOPIED + $(stat_num "$st" 'Number of regular files transferred')))
+    if [ "$PACK" = 1 ] && [ -s "$WORK/packplan_$i" ]; then
+      pack_drive "$i" "$dest"; COPIED=$((COPIED + PK_COPIED)); NCOPIED=$((NCOPIED + PK_NCOPIED))
+    fi
     offset=$((offset + EST_XFER[i])); foffset=$((foffset + EST_NFILES[i]))
   done
+  PACKX_OPT=()
   local ERRN; ERRN=$(grep -c '^rsync:' "$ERRLOG" 2>/dev/null); ERRN=${ERRN:-0}
 
   if [ "$DRY" = 1 ]; then
@@ -1317,9 +1578,14 @@ $( [ "$DRY" = 1 ] && echo 'DRY RUN: nothing will be written.' )" \
     for i in "${!DRV_ROOT[@]}"; do
       [ -n "${DRV_WANT[$i]}" ] || continue
       echo "== verifying ${DRV_NAME[$i]} ($VERIFY)..."
+      local px=(); [ "$PACK" = 1 ] && [ -s "$WORK/packx_$i" ] && px=(--exclude-from="$WORK/packx_$i")
       rsync "${RS_BASE[@]}" -n -i $( [ "$VERIFY" = full ] && printf -- '--checksum' ) \
-        --exclude-from="$EXC_USED" --filter="merge $WORK/filter_$i" "${DRV_ROOT[$i]}/" "$DST/${DRV_PREFIX[$i]}/" 2>>"$ERRLOG" \
+        --exclude-from="$EXC_USED" "${px[@]}" --filter="merge $WORK/filter_$i" "${DRV_ROOT[$i]}/" "$DST/${DRV_PREFIX[$i]}/" 2>>"$ERRLOG" \
         | grep -E '^[>.<c]f' | sed "s|^|${DRV_PREFIX[$i]}|" >>"$VLOG"
+      if [ "$PACK" = 1 ] && [ -s "$WORK/packplan_$i" ] && [ -f "$WORK/packlist_$i" ]; then
+        python3 -c "$PY_PACKCHECK" "$DST/${DRV_PREFIX[$i]}" "$WORK/packplan_$i" "$WORK/packlist_$i" "$VERIFY" \
+          | sed "s|^|ZIP ${DRV_PREFIX[$i]}|" >>"$VLOG"
+      fi
     done
     vmiss=$(grep -c . "$VLOG"); vmiss=${vmiss:-0}
     if [ "$vmiss" = 0 ]; then VRES="OK ($VERIFY): every selected file is present at the destination"
@@ -1329,7 +1595,14 @@ $( [ "$DRY" = 1 ] && echo 'DRY RUN: nothing will be written.' )" \
 
   # ---- 12. manifest, README, summary ----
   echo "== writing manifest..."
-  find "$DST" -type f ! -name '_*' ! -name 'README_RESTORE.txt' -printf '%s\t%P\n' 2>/dev/null | sort -t$'\t' -k2 >"$DST/_manifest.tsv"
+  { find "$DST" -type f ! -name '_*' ! -name 'README_RESTORE.txt' -printf '%s\t%P\n' 2>/dev/null
+    for i in "${!DRV_ROOT[@]}"; do [ -s "$WORK/packplan_$i" ] && python3 -c "$PY_PACKMANIFEST" "$DST/${DRV_PREFIX[$i]}" "$WORK/packplan_$i" | sed "s|\t|\t${DRV_PREFIX[$i]}|"; done
+  } | sort -t$'\t' -k2 >"$DST/_manifest.tsv"
+  if [ "$PACK" = 1 ] && [ -s "$WORK/packs_all.txt" ]; then
+    { echo "# Folders packed as store-only .zip (one per line: zip path relative to this folder). Extract in place,"
+      echo "# or run winbackup.sh --restore which unpacks them automatically."
+      cut -f4 "$WORK/packs_all.txt"; } >"$DST/_packed.txt"
+  fi
   local MAN_N MAN_B; MAN_N=$(wc -l <"$DST/_manifest.tsv"); MAN_B=$(awk -F'\t' '{s+=$1} END{print s+0}' "$DST/_manifest.tsv")
   local T_END; T_END=$(now)
   cat >>"$DST/_summary.txt" <<S
@@ -1450,12 +1723,42 @@ RESTORING (from Windows Explorer, after the fresh install)
   (pick this folder, pick the new Windows drive, tick what to put back; it can map old
   user names to new ones).
 
+PACKED FOLDERS (.zip)
+  Folders with huge numbers of small files (AppData\\Local\\<app>, big source trees...) may be stored
+  as ONE store-only .zip each, e.g. Users\\<name>\\AppData\\Local\\Google.zip instead of a Google\\
+  folder. That is ~10x faster to write on hard drives and network shares. Open the zip in Explorer
+  and drag out what you need, or "Extract All" next to it; _packed.txt lists them and _manifest.tsv
+  lists every file inside them. --restore unpacks them for you.
+
 NOT INCLUDED (on purpose)
   Registry hives (NTUSER.DAT), caches, temp files, junctions like "My Documents", OneDrive
   files that were online-only placeholders (they were never on the disk), and everything in
   _excludes_used.txt. Installed programs must be reinstalled; their settings are in AppData.
 R
 }
+
+# Unpack one packed zip into a directory. policy skip = keep existing files.
+read -r -d '' PY_UNPACK <<'PY'
+import sys, os, zipfile, time
+z, target, policy = sys.argv[1], sys.argv[2], sys.argv[3]
+n = 0
+with zipfile.ZipFile(z) as zz:
+    for i in zz.infolist():
+        if i.is_dir(): continue
+        out = os.path.join(target, i.filename)
+        if policy == 'skip' and os.path.exists(out): continue
+        os.makedirs(os.path.dirname(out), exist_ok=True)
+        with zz.open(i) as src, open(out, 'wb') as dst:
+            while True:
+                b = src.read(1 << 20)
+                if not b: break
+                dst.write(b)
+        try:
+            ts = time.mktime(i.date_time + (0, 0, -1)); os.utime(out, (ts, ts))
+        except Exception: pass
+        n += 1
+print(n)
+PY
 
 # ================================================================= RESTORE
 restore_main() {
@@ -1554,14 +1857,25 @@ Start?" || exit 1
   local LOG="$TGT/winbackup_restore_$(date +%Y-%m-%d_%H%M).log" offset=0 FAILED=0 rc
   echo "winbackup restore $(now)  from $BK" >"$LOG"
   clear 2>/dev/null; echo "Restoring -> $TGT"; echo
+  # packed zips (from _packed.txt) are not copied as files: they are unpacked straight into the target
+  local PACKED=(); [ -f "$BK/_packed.txt" ] && mapfile -t PACKED < <(grep -v '^#' "$BK/_packed.txt")
   for i in "${!J_SRC[@]}"; do
     s=${J_SRC[$i]}; dst=${J_DST[$i]}
     echo "== ${dst#"$TGT"/}"
     if [ -d "$s" ]; then
       mkdir -p "$dst"
-      rsync "${RS_BASE[@]}" "${POL[@]}" --outbuf=N --info=progress2,name1 --stats "$s/" "$dst/" 2>>"$LOG" \
+      local zx=() z zrel srel=${s#"$BK"/}; srel=${srel%/}
+      for z in "${PACKED[@]}"; do zrel=${z#"$srel"/}; [ "$zrel" != "$z" ] && zx+=(--exclude="/$(esc "$zrel")"); done
+      rsync "${RS_BASE[@]}" "${POL[@]}" "${zx[@]}" --outbuf=N --info=progress2,name1 --stats "$s/" "$dst/" 2>>"$LOG" \
         | python3 -c "$PY_PROGRESS" "[restore]" "$offset" "$TOT" "$WORK/rst_$i"
       rc=${PIPESTATUS[0]}
+      for z in "${PACKED[@]}"; do
+        zrel=${z#"$srel"/}; [ "$zrel" != "$z" ] || continue
+        [ -f "$BK/$z" ] || continue
+        echo "   unpacking ${z##*/} ..."
+        local un; un=$(python3 -c "$PY_UNPACK" "$BK/$z" "$dst/$(dirname "$zrel")" "$( [ "$POLICY" = skip ] && echo skip || echo overwrite )" 2>>"$LOG") || { FAILED=$((FAILED+1)); echo "   unpack failed (see log)"; }
+        echo "   $un file(s) from ${z##*/}"
+      done
     else
       mkdir -p "$(dirname "$dst")"; rsync "${RS_BASE[@]}" "${POL[@]}" "$s" "$dst" 2>>"$LOG"; rc=$?
     fi
