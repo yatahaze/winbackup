@@ -111,6 +111,7 @@ ask_check() {  # title text tag item ON|OFF ...  -> chosen tags, one per line
   if [ -n "$ANSWERS" ]; then
     local a; a=$(next_answer)
     if [ "$a" = "@all" ]; then local k; for (( k=1; k<=$#; k+=3 )); do printf '%s\n' "${!k}"; done
+    elif [ "$a" = "@default" ]; then local k j; for (( k=1; k<=$#; k+=3 )); do j=$((k+2)); [ "${!j}" = ON ] && printf '%s\n' "${!k}"; done
     elif [ -n "$a" ]; then tr ';' '\n' <<<"$a"; fi
     return 0
   fi
@@ -444,7 +445,12 @@ gen_filter() {
     if [ -d "$root/$w" ]; then echo "+ /$(esc "$w")/" >>"$f"; else echo "+ /$(esc "$w")" >>"$f"; fi
   done
   for w in "${!anc[@]}"; do [ -n "${leaf[$w]:-}" ] || echo "+ /$(esc "$w")/" >>"$f"; done
-  for w in "${!anc[@]}"; do [ -n "${leaf[$w]:-}" ] || echo "- /$(esc "$w")/*" >>"$f"; done
+  for w in "${!anc[@]}"; do
+    # skip if this ancestor, or any folder above it, is itself wanted in full
+    p=$w; local covered=0
+    while :; do [ -n "${leaf[$p]:-}" ] && { covered=1; break; }; [[ "$p" == */* ]] || break; p=${p%/*}; done
+    [ "$covered" = 1 ] || echo "- /$(esc "$w")/*" >>"$f"
+  done
   echo "- /*" >>"$f"
 }
 
@@ -482,8 +488,9 @@ Is this really the Windows drive? Continue anyway (you can still pick root folde
     echo "Checking free space on candidate drives..."
     DST_DEV=$(pick_part "DESTINATION: where should the backup go?" \
       "Pick the partition to write to (e.g. the DrivePool disk). It will be mounted read-write.
-Rough guide: C: has $(hr "$WORST") in use INCLUDING Windows and programs; the backup is usually
-well under that. The exact size (after exclusions) is shown before anything is copied." \
+Rough guide: C: has $(hr "$WORST") in use; \\Windows (typically 25-40 GB) and caches are never copied,
+so the backup is somewhat smaller. The exact size is shown before anything is copied.
+Folders you tick on OTHER drives add to this." \
       'ntfs|exfat|vfat|ext4|ext3|xfs|btrfs' "$SRC_DEV" "$WORST") || exit 1
     [ "$DST_DEV" = "$SRC_DEV" ] && die "Source and destination are the same partition."
     if [ "$DRY" = 1 ]; then
@@ -565,16 +572,17 @@ Choose No to create a new folder with the time appended instead."; then
 
   # ---- 5. categories ----
   local CATS
-  CATS=$(ask_check "What to back up" "Space toggles, Enter confirms. Junk (caches, temp, registry hives) is always skipped:" \
+  CATS=$(ask_check "What to back up" "Everything is ticked: this is a full copy of the drives minus junk (caches, temp, registry
+hives, Windows itself). Untick only what you are sure you do not want. Space toggles, Enter confirms." \
     docs     "Desktop, Documents, Downloads, Pictures, Videos, Music, Saved Games, Favorites, Contacts" ON \
     roaming  "AppData\\Roaming  (app settings, browser profiles, game saves)" ON \
     local    "AppData\\Local + LocalLow  (bigger: browser/Discord data, Unity saves, app data)" ON \
     dotfiles "Hidden home files (.ssh, .gitconfig, .config, .vscode, ...)" ON \
     other    "Everything else in the profile (OneDrive, misc folders and files)" ON \
     steam    "Steam saves + settings (userdata, config; libraries found on all NTFS drives)" ON \
-    steamgames "Installed Steam games (steamapps\\common; hundreds of GB, re-downloadable)" OFF \
-    root     "Other folders at the root of C: (you pick next; Windows.old is listed)" OFF \
-    pdata    "ProgramData (shared app data; can be large)" OFF \
+    steamgames "Installed Steam games (steamapps\\common; often hundreds of GB, re-downloadable)" ON \
+    root     "Everything else on C: (Program Files, app/game folders, Windows.old...; never \\Windows)" ON \
+    pdata    "ProgramData (shared app data)" ON \
     ) || exit 1
   has() { grep -qx "$1" <<<"$CATS"; }
   local DOCS=(Desktop Documents Downloads Pictures Videos Music "Saved Games" Favorites Contacts Links Searches "3D Objects")
@@ -645,11 +653,11 @@ Choose No to create a new folder with the time appended instead."; then
     items=()
     for d in "$SRC"/*/; do
       n=$(basename "$d")
-      case "$n" in Windows|Users|ProgramData|'$Recycle.Bin'|'$RECYCLE.BIN'|'System Volume Information'|PerfLogs|Recovery|'$WinREAgent'|'Documents and Settings') continue;; esac
-      items+=("$n" "" OFF)
+      case "$n" in Windows|Users|ProgramData|'$Recycle.Bin'|'$RECYCLE.BIN'|'System Volume Information'|PerfLogs|Recovery|'$WinREAgent'|'Documents and Settings'|found.000) continue;; esac
+      items+=("$n" "" ON)
     done
     if [ ${#items[@]} -gt 0 ]; then
-      local out; out=$(ask_check "Root folders on C:" "Extra folders at the root of the Windows drive:" "${items[@]}") || exit 1
+      local out; out=$(ask_check "Root folders on C:" "All other folders on the Windows drive (Users and ProgramData are handled by their own categories; \\Windows is never copied). Untick anything you do not want:" "${items[@]}") || exit 1
       while IFS= read -r n; do [ -n "$n" ] && want 0 "$n"; done <<<"$out"
     fi
   fi
@@ -661,18 +669,18 @@ Choose No to create a new folder with the time appended instead."; then
     [ "$i" = 0 ] && continue
     for d in "${DRV_ROOT[$i]}"/*/; do
       n=$(basename "$d")
-      case "$n" in '$RECYCLE.BIN'|'$Recycle.Bin'|'System Volume Information'|Windows|'Program Files'|'Program Files (x86)'|ProgramData|found.000) continue;; esac
+      case "$n" in '$RECYCLE.BIN'|'$Recycle.Bin'|'System Volume Information'|Windows|found.000) continue;; esac
       O_DRV+=("$i"); O_NAME+=("$n")
     done
   done
   if [ ${#O_DRV[@]} -gt 0 ]; then
     items=()
     for i in "${!O_DRV[@]}"; do
-      n="${O_NAME[$i]}"; local desc=""
-      [[ "$n" == PoolPart.* ]] && desc="(DrivePool data)"
-      items+=("$i" "${DRV_NAME[${O_DRV[$i]}]}:\\$n  $desc" OFF)
+      n="${O_NAME[$i]}"; local desc="" st=ON
+      [[ "$n" == PoolPart.* ]] && { desc="(DrivePool pool data; usually not what you want to back up)"; st=OFF; }
+      items+=("$i" "${DRV_NAME[${O_DRV[$i]}]}:\\$n  $desc" "$st")
     done
-    local out; out=$(ask_check "Folders on other drives" "Other NTFS drives were found. Tick any folders to include (saved under Drive_<label>\\ in the backup). Steam libraries are handled separately." "${items[@]}") || exit 1
+    local out; out=$(ask_check "Folders on other drives" "Other NTFS drives were found; everything on them is ticked (saved under Drive_<label>\\ in the backup). Untick what you do not want. Steam libraries in these folders are covered either way." "${items[@]}") || exit 1
     while IFS= read -r i; do [ -n "$i" ] && want "${O_DRV[$i]}" "${O_NAME[$i]}"; done <<<"$out"
   fi
 

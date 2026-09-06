@@ -230,6 +230,36 @@ exists "$D4/WinBackup_$DATE/Program Files (x86)/Steam/config/loginusers.vdf"
 absent "$D4/WinBackup_$DATE/Program Files (x86)/Steam/steamapps"
 absent "$D4/WinBackup_$DATE/Drive_Data"
 
+echo "=== run 4b: defaults are a full copy (all root folders, all other-drive folders, no Windows, no PoolPart)"
+D5=$T/dst5; mkdir -p "$D5"; mk "$X/PoolPart.zzz/pooled.txt"; mk "$X/Windows/x"
+cat >"$T/a4b" <<A
+/
+@default
+bob
+docs;steam;steamgames;root;pdata
+@all
+@default
+@default
+yes
+no
+skip
+A
+bash "$SCRIPT" --src "$S" --dst "$D5" --extra "$X" --answers "$T/a4b" >"$T/out4b" 2>"$T/err4b"; rc=$?
+[ $rc = 0 ] && ok || { fail "run 4b exit $rc"; tail -20 "$T/err4b"; }
+exists "$D5/WinBackup_$DATE/Custom/thing.txt"
+exists "$D5/WinBackup_$DATE/Unwanted/x"
+exists "$D5/WinBackup_$DATE/Program Files (x86)/Other/x"
+exists "$D5/WinBackup_$DATE/Program Files (x86)/Steam/steam.exe"
+exists "$D5/WinBackup_$DATE/Program Files (x86)/Steam/steamapps/common/Game/game.exe"
+exists "$D5/WinBackup_$DATE/ProgramData/App/data"
+absent "$D5/WinBackup_$DATE/Windows"
+absent "$D5/WinBackup_$DATE/pagefile.sys"
+exists "$D5/WinBackup_$DATE/Drive_Data/Games/other.txt"
+exists "$D5/WinBackup_$DATE/Drive_Data/Photos/p.jpg"
+absent "$D5/WinBackup_$DATE/Drive_Data/PoolPart.zzz"
+absent "$D5/WinBackup_$DATE/Drive_Data/Windows"
+rm -rf "$X/PoolPart.zzz" "$X/Windows"
+
 echo "=== run 5: restore into a fresh Windows drive, mapping bob -> ryan"
 W=$T/newwin; mk "$W/Users/ryan/Desktop/existing.txt" "keep"; mk "$W/Windows/x"
 cat >"$T/a5" <<A

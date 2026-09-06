@@ -129,7 +129,15 @@ steamapps/shadercache/
 steamapps/workshop/temp/
 steamapps/workshop/downloads/
 
-# ---- ProgramData (only used if you tick the ProgramData category) ----
+# ---- dead-system folders at the root of C: (the useful part of Windows.old is its Users folder) ----
+Windows.old/Windows/
+Windows.old/Program Files/WindowsApps/
+Program Files/WindowsApps/
+Program Files/ModifiableWindowsApps/
+Program Files/Windows Defender/
+Program Files/Windows Defender Advanced Threat Protection/
+
+# ---- ProgramData ----
 ProgramData/Package Cache/
 ProgramData/Microsoft/Windows Defender/
 ProgramData/Microsoft/Search/
