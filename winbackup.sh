@@ -567,7 +567,8 @@ Choose No to create a new folder with the time appended instead."; then
     local    "AppData\\Local + LocalLow  (bigger: browser/Discord data, Unity saves, app data)" ON \
     dotfiles "Hidden home files (.ssh, .gitconfig, .config, .vscode, ...)" ON \
     other    "Everything else in the profile (OneDrive, misc folders and files)" ON \
-    steam    "Steam libraries: steamapps + userdata (scanned on all NTFS drives)" ON \
+    steam    "Steam saves + settings (userdata, config; libraries found on all NTFS drives)" ON \
+    steamgames "Installed Steam games (steamapps\\common; hundreds of GB, re-downloadable)" OFF \
     root     "Other folders at the root of C: (you pick next; Windows.old is listed)" OFF \
     pdata    "ProgramData (shared app data; can be large)" OFF \
     ) || exit 1
@@ -589,7 +590,10 @@ Choose No to create a new folder with the time appended instead."; then
   done
 
   # ---- 6. Steam libraries anywhere on any NTFS drive ----
-  if has steam; then
+  # saves/settings = userdata (Steam Cloud saves, per-game config) + config (login, library list)
+  # games          = steamapps (common/, manifests, workshop). Most games' own saves live in the
+  # profile (Documents\My Games, Saved Games, AppData\LocalLow...), which the profile categories cover.
+  if has steam || has steamgames; then
     local S_DRV=() S_REL=() s rel
     for i in "${!DRV_ROOT[@]}"; do
       while IFS= read -r s; do
@@ -601,10 +605,12 @@ Choose No to create a new folder with the time appended instead."; then
     if [ ${#S_DRV[@]} -gt 0 ]; then
       items=()
       for i in "${!S_DRV[@]}"; do items+=("$i" "${DRV_NAME[${S_DRV[$i]}]}:\\${S_REL[$i]//\//\\}" ON); done
-      local picked; picked=$(ask_check "Steam libraries found" "steamapps (games + saves) and userdata (cloud saves, config) are copied from each:" "${items[@]}") || exit 1
+      local parts=() what=""; has steam && { parts+=(userdata config); what="userdata + config (saves/settings)"; }
+      has steamgames && { parts+=(steamapps); what="${what:+$what, }steamapps (installed games)"; }
+      local picked; picked=$(ask_check "Steam libraries found" "Copy $what from these libraries:" "${items[@]}") || exit 1
       while IFS= read -r i; do
         [ -n "$i" ] || continue
-        for d in steamapps userdata config; do
+        for d in "${parts[@]}"; do
           [ -d "${DRV_ROOT[${S_DRV[$i]}]}/${S_REL[$i]}/$d" ] && want "${S_DRV[$i]}" "${S_REL[$i]}/$d"
         done
       done <<<"$picked"

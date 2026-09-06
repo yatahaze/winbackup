@@ -24,6 +24,7 @@ other drives under `Drive_<label>\`). Also written: `README_RESTORE.txt`, `_mani
   offered if all read-only attempts fail, and ask first.
 * `winbackup-excludes.txt` (next to the script) is the skip list. Patterns are rsync excludes
   matched from the drive root, so `AppData/Local/Temp/` and `AppData/**/Cache/` work as expected.
+* Steam: "saves + settings" (userdata, config) is on by default; "installed Steam games" (steamapps) is a separate category, off by default.
 * Resume: rerun with the same destination folder; rsync skips files already copied (size+mtime).
 * Verify step at the end: quick (presence + size/mtime) or full (checksums).
 

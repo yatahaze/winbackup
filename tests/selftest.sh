@@ -84,7 +84,7 @@ __type__
 poolpart.ABC123/Backups
 @default
 bob;Alice Smith;Public
-docs;roaming;local;dotfiles;other;steam;root;pdata
+docs;roaming;local;dotfiles;other;steam;steamgames;root;pdata
 @all
 Custom
 1
@@ -172,7 +172,7 @@ PoolPart.abc123
 Backups/WinBackup_$DATE
 yes
 bob;Alice Smith;Public
-docs;roaming;local;dotfiles;other;steam;root;pdata
+docs;roaming;local;dotfiles;other;steam;steamgames;root;pdata
 @all
 Custom
 1
@@ -201,13 +201,14 @@ bash "$SCRIPT" --dry-run --src "$S" --dst "$D3" --answers "$T/a3" >"$T/out3" 2>"
 [ -z "$(ls -A "$D3")" ] && ok || fail "dry run wrote to destination: $(ls -A "$D3")"
 grep -q 'DRY RUN complete' "$T/out3" && ok || fail "dry run summary missing"
 
-echo "=== run 4: category off is honoured (docs only, no AppData)"
+echo "=== run 4: category off is honoured (docs + Steam saves only: no AppData, no installed games)"
 D4=$T/dst4; mkdir -p "$D4"
 cat >"$T/a4" <<A
 /
 @default
 bob
-docs
+docs;steam
+@all
 yes
 no
 skip
@@ -218,7 +219,10 @@ exists "$D4/WinBackup_$DATE/Users/bob/Documents/report.docx"
 absent "$D4/WinBackup_$DATE/Users/bob/AppData"
 absent "$D4/WinBackup_$DATE/Users/bob/stray.txt"
 absent "$D4/WinBackup_$DATE/Users/bob/.ssh"
-absent "$D4/WinBackup_$DATE/Program Files (x86)"
+exists "$D4/WinBackup_$DATE/Program Files (x86)/Steam/userdata/1/remote/save"
+exists "$D4/WinBackup_$DATE/Program Files (x86)/Steam/config/loginusers.vdf"
+absent "$D4/WinBackup_$DATE/Program Files (x86)/Steam/steamapps"
+absent "$D4/WinBackup_$DATE/Drive_Data"
 
 echo "=== run 5: restore into a fresh Windows drive, mapping bob -> ryan"
 W=$T/newwin; mk "$W/Users/ryan/Desktop/existing.txt" "keep"; mk "$W/Windows/x"
