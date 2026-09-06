@@ -4,6 +4,8 @@
 #   sudo bash winbackup.sh                 interactive backup (menus)
 #   sudo bash winbackup.sh --dry-run       do everything except the copy; nothing is written to the destination
 #   sudo bash winbackup.sh --restore       copy categories from a previous backup back onto a Windows drive
+#   sudo bash winbackup.sh --other-drives  also mount the other NTFS drives read-only and offer their folders
+#                                          and Steam libraries (default: only the one source drive is touched)
 #   sudo bash winbackup.sh --src DIR --dst DIR [--extra DIR]...
 #                                          use already-mounted directories instead of picking partitions
 #   bash winbackup.sh --answers FILE ...   scripted mode: read menu answers from FILE (used by tests/selftest.sh)
@@ -29,7 +31,7 @@ umask 022
 VERSION="2.0"
 
 # ---------------------------------------------------------------- args
-DRY=0; MODE=backup; SRC_OVERRIDE=""; DST_OVERRIDE=""; EXTRA_OVERRIDES=(); ANSWERS=""; EXCL_SUMMARY=1
+DRY=0; MODE=backup; SRC_OVERRIDE=""; DST_OVERRIDE=""; EXTRA_OVERRIDES=(); ANSWERS=""; EXCL_SUMMARY=1; OTHER=0
 usage() { sed -n '2,12p' "$0" | sed 's/^# \{0,1\}//'; }
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -37,7 +39,8 @@ while [ $# -gt 0 ]; do
     --restore) MODE=restore;;
     --src) SRC_OVERRIDE=$2; shift;;
     --dst) DST_OVERRIDE=$2; shift;;
-    --extra) EXTRA_OVERRIDES+=("$2"); shift;;
+    --extra) EXTRA_OVERRIDES+=("$2"); OTHER=1; shift;;
+    --other-drives) OTHER=1;;
     --answers) ANSWERS=$2; shift;;
     --no-excluded-summary) EXCL_SUMMARY=0;;
     -h|--help) usage; exit 0;;
@@ -497,8 +500,7 @@ Is this really the Windows drive? Continue anyway (you can still pick root folde
     DST_DEV=$(pick_part "DESTINATION: where should the backup go?" \
       "Pick the partition to write to (e.g. the DrivePool disk). It will be mounted read-write.
 Rough guide: C: has $(hr "$WORST") in use; \\Windows (typically 25-40 GB) and caches are never copied,
-so the backup is somewhat smaller. The exact size is shown before anything is copied.
-Folders you tick on OTHER drives add to this." \
+so the backup is somewhat smaller. The exact size is shown before anything is copied." \
       'ntfs|exfat|vfat|ext4|ext3|xfs|btrfs' "$SRC_DEV" "$WORST") || exit 1
     [ "$DST_DEV" = "$SRC_DEV" ] && die "Source and destination are the same partition."
     if [ "$DRY" = 1 ]; then
@@ -548,9 +550,10 @@ Choose No to create a new folder with the time appended instead."; then
     rm -f "$DST/.winbackup_write_test"
   fi
 
-  # ---- 3. other NTFS drives (D:, E:) mounted read-only for Steam scan / extra folders ----
+  # ---- 3. other NTFS drives (D:, E:), only with --other-drives ----
   local dev fs size label mp x i
-  if [ -n "$SRC_OVERRIDE" ]; then
+  if [ "$OTHER" = 0 ]; then :
+  elif [ -n "$SRC_OVERRIDE" ]; then
     for x in "${EXTRA_OVERRIDES[@]}"; do add_drive "$(readlink -f "$x")" "Drive_$(sanitize "$(basename "$x")")" "" "Drive_$(sanitize "$(basename "$x")")/"; done
   else
     i=0
@@ -587,7 +590,7 @@ hives, Windows itself). Untick only what you are sure you do not want. Space tog
     local    "AppData\\Local + LocalLow  (bigger: browser/Discord data, Unity saves, app data)" ON \
     dotfiles "Hidden home files (.ssh, .gitconfig, .config, .vscode, ...)" ON \
     other    "Everything else in the profile (OneDrive, misc folders and files)" ON \
-    steam    "Steam saves + settings (userdata, config; libraries found on all NTFS drives)" ON \
+    steam    "Steam saves + settings (userdata, config) from every Steam library on this drive" ON \
     steamgames "Installed Steam games (steamapps\\common; often hundreds of GB, re-downloadable)" ON \
     root     "Everything else on C: (Program Files, app/game folders, Windows.old...; never \\Windows)" ON \
     pdata    "ProgramData (shared app data)" ON \

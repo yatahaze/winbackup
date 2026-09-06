@@ -11,8 +11,11 @@ sudo bash winbackup.sh --restore    # copy a backup back onto a (new) Windows dr
 
 Menus: source partition -> destination partition (shows free space per drive and a rough fit verdict against everything in use on C:) -> destination folder (PoolPart.* folders are
 listed; typed paths match case-insensitively) -> backup folder name (`WinBackup_<date>`; reuse the
-name to **resume**) -> user profiles -> categories -> Steam libraries found on any NTFS drive ->
-root folders on C: -> folders on other drives -> size estimate + biggest excluded junk -> confirm.
+name to **resume**) -> user profiles -> categories -> Steam libraries on the drive ->
+root folders on C: -> optional item-by-item drill-down -> size estimate + biggest excluded junk -> confirm.
+
+Only the one source drive is read. `--other-drives` additionally mounts the other NTFS drives
+read-only and offers their folders and Steam libraries (saved under `Drive_<label>\`).
 
 Output folder mirrors `C:\` (`Users\<name>\Documents\...`, `Program Files (x86)\Steam\steamapps`,
 other drives under `Drive_<label>\`). Also written: `README_RESTORE.txt`, `_manifest.tsv`
@@ -24,7 +27,7 @@ other drives under `Drive_<label>\`). Also written: `README_RESTORE.txt`, `_mani
   offered if all read-only attempts fail, and ask first.
 * `winbackup-excludes.txt` (next to the script) is the skip list. Patterns are rsync excludes
   matched from the drive root, so `AppData/Local/Temp/` and `AppData/**/Cache/` work as expected.
-* Defaults are a full copy: every profile, every other folder on C: (never \Windows), ProgramData, Steam, and every folder on other NTFS drives (PoolPart.* unticked). Untick what you do not want.
+* Defaults are a full copy of the drive: every profile, every other folder on C: (never \Windows), ProgramData, Steam. Untick what you do not want.
 * Drill-down: after the folder lists you can pick any folder (e.g. C:\Temp) and tick/untick its contents item by item, with sizes.
 * Steam: "saves + settings" (userdata, config) is on by default; "installed Steam games" (steamapps) is a separate category, off by default.
 * Resume: rerun with the same destination folder; rsync skips files already copied (size+mtime).
