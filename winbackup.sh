@@ -62,6 +62,10 @@ SCRIPT_DIR=$(cd "$(dirname "$(readlink -f "$0")")" && pwd)
 EXC_FILE="$SCRIPT_DIR/winbackup-excludes.txt"
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/winbackup.XXXXXX")
 MNT=/mnt/winbackup
+# Diagnostics: everything the run generated (mount log, rsync rules, rsync commands + errors) is
+# copied next to the script at exit, so a failed run on the live USB can be examined elsewhere.
+DIAG="$SCRIPT_DIR/logs/$(date +%Y-%m-%d_%H%M%S)"
+mkdir -p "$DIAG" 2>/dev/null || DIAG=""
 OUR_MOUNTS=()      # mountpoints we created: unmounted at exit
 OUR_DEVS=()        # the device behind each of those, so we can hand it back to the desktop
 REMOUNT_RW=()      # desktop mounts we flipped read-only: flipped back at exit
@@ -70,6 +74,13 @@ STAMP_DATE=$(date +%Y-%m-%d)
 cleanup() {
   local rc=$?
   sync
+  if [ -n "$DIAG" ]; then
+    cp "$WORK"/mount.log "$WORK"/commands.log "$WORK"/errors.log "$WORK"/filter_* "$WORK"/stats_* "$DIAG"/ 2>/dev/null
+    for f in "$WORK"/est_*; do [ -f "$f" ] && { grep -v '^\[sender\] \(hiding\|showing\)' "$f" | head -200 >"$DIAG/$(basename "$f").txt"; }; done
+    [ -n "${DST:-}" ] && cp "$DST"/_errors.log "$DST"/_summary.txt "$DIAG"/ 2>/dev/null
+    echo "exit code $rc at $(now)" >>"$DIAG/commands.log"
+    sync
+  fi
   # unmount in reverse order of mounting; lazy unmount as a fallback so we never hang at exit
   local i
   for (( i=${#OUR_MOUNTS[@]}-1; i>=0; i-- )); do
@@ -194,8 +205,8 @@ pick_part() {
 }
 part_label() { lsblk -no LABEL "$1" 2>/dev/null | head -1; }
 part_fstype() { lsblk -no FSTYPE "$1" 2>/dev/null | head -1; }
-current_mount() { findmnt -rn -o TARGET -S "$1" 2>/dev/null | head -1; }
-current_mount_opts() { findmnt -rn -o OPTIONS -S "$1" 2>/dev/null | head -1; }
+current_mount() { findmnt -ln -o TARGET -S "$1" 2>/dev/null | head -1; }
+current_mount_opts() { findmnt -ln -o OPTIONS -S "$1" 2>/dev/null | head -1; }
 
 # try_mount dev mountpoint fstype options  (fstype "" = let mount pick)
 try_mount() {
@@ -467,11 +478,15 @@ gen_filter() {
 
 # rsync options shared by estimate/copy/verify. No -l: junctions show up as symlinks, skip them.
 RS_BASE=(-r -t --no-perms --no-owner --no-group --modify-window=2 --partial --info=nonreg0)
+# rs: run rsync, recording the exact command line and exit code in $WORK/commands.log
+rs() { printf '%s rsync' "$(now)" >>"$WORK/commands.log"; printf ' %q' "$@" >>"$WORK/commands.log"; echo >>"$WORK/commands.log"
+       rsync "$@"; local rc=$?; echo "  -> exit $rc" >>"$WORK/commands.log"; return $rc; }
 
 # ================================================================= BACKUP
 backup_main() {
   ensure_exclude_file
-  local SRC SRC_DEV="" DST_DEV="" DSTROOT DST NAME RESUMED=0
+  local SRC SRC_DEV="" DST_DEV="" DSTROOT NAME RESUMED=0
+  DST=""
 
   # ---- 1. source drive ----
   if [ -n "$SRC_OVERRIDE" ]; then
@@ -749,8 +764,17 @@ Leave everything unticked to copy those folders whole." "${items[@]}") || exit 1
     local dest="$DST/${DRV_PREFIX[$i]}" est="$WORK/est_$i"
     [ -d "$dest" ] || dest="$WORK/empty_$i/"; mkdir -p "$dest"
     echo "  ${DRV_NAME[$i]}: $(tr '\n' ' ' <<<"${DRV_WANT[$i]}" | cut -c1-150)"
-    rsync "${RS_BASE[@]}" -n --stats --debug=FILTER --exclude-from="$EXC_USED" --filter="merge $WORK/filter_$i" \
+    rs "${RS_BASE[@]}" -n --stats --debug=FILTER --exclude-from="$EXC_USED" --filter="merge $WORK/filter_$i" \
       "${DRV_ROOT[$i]}/" "$dest/" >"$est" 2>>"$ERRLOG"
+    local src_rc=$?
+    if [ "$src_rc" != 0 ] && [ "$src_rc" != 23 ] && [ "$src_rc" != 24 ]; then
+      ask_msg "Scan failed" "rsync could not read ${DRV_NAME[$i]} (${DRV_ROOT[$i]}), exit code $src_rc:
+
+$(tail -n 8 "$ERRLOG")
+
+Nothing has been copied. Diagnostics: ${DIAG:-$WORK}"
+      exit 1
+    fi
     EST_SEL[$i]=$(stat_num "$est" 'Total file size')
     EST_XFER[$i]=$(stat_num "$est" 'Total transferred file size')
     EST_NFILES[$i]=$(stat_num "$est" 'Number of regular files transferred')
@@ -768,6 +792,15 @@ Leave everything unticked to copy those folders whole." "${items[@]}") || exit 1
     echo "     selected $(hr "${EST_SEL[$i]}"), to copy $(hr "${EST_XFER[$i]}") in ${EST_NFILES[$i]} files"
   done
   local FREE; FREE=$(df -B1 --output=avail "$DSTROOT" 2>/dev/null | tail -1); FREE=${FREE:-0}
+  if [ "$TOT_SEL" = 0 ]; then
+    ask_msg "Nothing found" "The scan found 0 bytes in the selected folders, which is not plausible for a Windows drive.
+Source: $SRC
+Recent errors:
+$(tail -n 6 "$ERRLOG" 2>/dev/null)
+
+Nothing will be copied. Diagnostics: ${DIAG:-$WORK}"
+    exit 1
+  fi
 
   local EXCL_TXT="" EXCL_TOTAL=0
   if [ "$EXCL_SUMMARY" = 1 ] && [ -s "$HIDDEN" ]; then
@@ -824,7 +857,7 @@ $( [ "$DRY" = 1 ] && echo 'DRY RUN: nothing will be written. Continue?' || echo 
     echo "== ${DRV_NAME[$i]}  ($(hr "${EST_XFER[$i]}") to copy)"
     [ "$DRY" = 1 ] || mkdir -p "$dest"
     echo "=== $(now) ${DRV_NAME[$i]} (${DRV_ROOT[$i]}) -> $dest" >>"$ERRLOG"
-    rsync "${RS_BASE[@]}" --info=progress2,name1 --stats \
+    rs "${RS_BASE[@]}" --info=progress2,name1 --stats \
       $( [ "$DRY" = 1 ] && printf -- '--dry-run' ) \
       --exclude-from="$EXC_USED" --filter="merge $WORK/filter_$i" "${DRV_ROOT[$i]}/" "$dest/" 2>>"$ERRLOG" \
       | python3 -c "$PY_PROGRESS" "[${DRV_NAME[$i]}]" "$offset" "$TOT_XFER" "$st"
