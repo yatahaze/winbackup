@@ -9,7 +9,7 @@ sudo bash winbackup.sh --dry-run    # everything except the copy; writes nothing
 sudo bash winbackup.sh --restore    # copy a backup back onto a (new) Windows drive
 ```
 
-Menus: source partition -> destination partition -> destination folder (PoolPart.* folders are
+Menus: source partition -> destination partition (shows free space per drive and a rough fit verdict against everything in use on C:) -> destination folder (PoolPart.* folders are
 listed; typed paths match case-insensitively) -> backup folder name (`WinBackup_<date>`; reuse the
 name to **resume**) -> user profiles -> categories -> Steam libraries found on any NTFS drive ->
 root folders on C: -> folders on other drives -> size estimate + biggest excluded junk -> confirm.

@@ -100,7 +100,7 @@ esc() { printf '%s\n' "$1" | sed 's/[][*?\\]/\\&/g'; }
 
 ask_menu() {   # title text tag item [tag item...]  -> chosen tag
   local t=$1 m=$2; shift 2
-  if [ -n "$ANSWERS" ]; then local a; a=$(next_answer); echo "[$t] -> $a" >&2; printf '%s\n' "$a"; return; fi
+  if [ -n "$ANSWERS" ]; then local a; a=$(next_answer); printf '   %s\n' "$@" >&2; echo "[$t] -> $a" >&2; printf '%s\n' "$a"; return; fi
   local n=$(( $# / 2 )) h; h=$(( n < 12 ? n : 12 ))
   whiptail --title "$t" --menu "$m" "$(dlg_h $(( h + 7 + $(text_lines "$m") )))" 90 "$h" "$@" 3>&1 1>&2 2>&3
 }
@@ -142,12 +142,36 @@ list_parts() {
     printf '%s|%s|%s|%s|%s\n' "$NAME" "$FSTYPE" "$SIZE" "$LABEL" "$MOUNTPOINT"
   done
 }
-# pick_part title text fstype-regex [exclude-dev] -> device
+# part_free dev -> free bytes. Uses the existing mount if there is one, otherwise mounts
+# read-only for a moment (about a second) so the destination menu can show free space.
+part_free() {
+  local mp; mp=$(current_mount "$1")
+  if [ -n "$mp" ]; then df -B1 --output=avail "$mp" 2>/dev/null | tail -1; return; fi
+  local p="$WORK/probe"; mkdir -p "$p"
+  if mount -o ro "$1" "$p" 2>>"$WORK/mount.log" || mount -t ntfs-3g -o ro "$1" "$p" 2>>"$WORK/mount.log"; then
+    df -B1 --output=avail "$p" 2>/dev/null | tail -1
+    umount "$p" 2>/dev/null || umount -l "$p" 2>/dev/null
+  fi
+}
+# fit_tag free need -> rough verdict. "need" is the worst case (everything in use on C:), and
+# user data is typically 30-70% of that, hence the half-way "probably fits" band.
+fit_tag() {
+  [ -n "$1" ] && [ -n "$2" ] && [ "$2" -gt 0 ] || return 0
+  if [ "$1" -ge "$2" ]; then echo "[fits, even worst case]"
+  elif [ "$1" -ge $(( $2 / 2 )) ]; then echo "[probably fits]"
+  else echo "[MAY BE TOO SMALL]"; fi
+}
+# pick_part title text fstype-regex [exclude-dev] [need-bytes] -> device
+# With need-bytes, each entry also shows free space and a rough fit verdict.
 pick_part() {
-  local items=() dev fs size label mp desc
+  local items=() dev fs size label mp desc free
   while IFS='|' read -r dev fs size label mp; do
     [ -n "${4:-}" ] && [ "$dev" = "$4" ] && continue
     desc="${label:-(no label)}  $size  $fs"
+    if [ -n "${5:-}" ]; then
+      free=$(part_free "$dev")
+      desc="$desc  free $( [ -n "$free" ] && hr "$free" || echo '?' )  $(fit_tag "$free" "$5")"
+    fi
     [ -n "$mp" ] && desc="$desc  [mounted: $mp]"
     items+=("$dev" "$desc")
   done < <(list_parts "$3")
@@ -441,14 +465,22 @@ $(mount_log_tail)"; exit 1; }
   [ -d "$SRC/Users" ] || ask_yesno "No Users folder" "No \\Users folder found on the source ($SRC).
 Is this really the Windows drive? Continue anyway (you can still pick root folders)?" || exit 1
   add_drive "$SRC" "C" "$SRC_DEV" ""
+  # Instant worst-case size: everything in use on C: minus the page/hibernation files.
+  # The real (post-exclude) figure is computed after the selections; this is only a guide.
+  local WORST f; WORST=$(df -B1 --output=used "$SRC" 2>/dev/null | tail -1); WORST=${WORST:-0}
+  for f in pagefile.sys hiberfil.sys swapfile.sys; do [ -f "$SRC/$f" ] && WORST=$(( WORST - $(stat -c %s "$SRC/$f") )); done
+  [ "$WORST" -lt 0 ] && WORST=0
 
   # ---- 2. destination drive + folder ----
   if [ -n "$DST_OVERRIDE" ]; then
     DSTROOT=$(readlink -f "$DST_OVERRIDE"); [ -d "$DSTROOT" ] || die "--dst not a directory: $DSTROOT"
   else
+    echo "Checking free space on candidate drives..."
     DST_DEV=$(pick_part "DESTINATION: where should the backup go?" \
-      "Pick the partition to write to (e.g. the DrivePool disk). It will be mounted read-write." \
-      'ntfs|exfat|vfat|ext4|ext3|xfs|btrfs' "$SRC_DEV") || exit 1
+      "Pick the partition to write to (e.g. the DrivePool disk). It will be mounted read-write.
+Rough guide: C: has $(hr "$WORST") in use INCLUDING Windows and programs; the backup is usually
+well under that. The exact size (after exclusions) is shown before anything is copied." \
+      'ntfs|exfat|vfat|ext4|ext3|xfs|btrfs' "$SRC_DEV" "$WORST") || exit 1
     [ "$DST_DEV" = "$SRC_DEV" ] && die "Source and destination are the same partition."
     if [ "$DRY" = 1 ]; then
       DSTROOT=$(mount_ro "$DST_DEV" "$MNT/dst") || { ask_msg "Mount failed" "Could not mount $DST_DEV.
