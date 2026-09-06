@@ -69,6 +69,13 @@ MNT=/mnt/winbackup
 # copied next to the script at exit, so a failed run on the live USB can be examined elsewhere.
 DIAG="$SCRIPT_DIR/logs/$(date +%Y-%m-%d_%H%M%S)"
 mkdir -p "$DIAG" 2>/dev/null || DIAG=""
+# Hold a logind inhibitor for the whole run so the live desktop does not auto-suspend mid-copy
+# (screen blanking is still allowed). Released by cleanup.
+INHIBIT_PID=""
+if command -v systemd-inhibit >/dev/null 2>&1; then
+  systemd-inhibit --what=sleep:idle:handle-lid-switch --who=winbackup --why="Backup in progress" sleep infinity >/dev/null 2>&1 &
+  INHIBIT_PID=$!
+fi
 OUR_MOUNTS=()      # mountpoints we created: unmounted at exit
 OUR_DEVS=()        # the device behind each of those, so we can hand it back to the desktop
 REMOUNT_RW=()      # desktop mounts we flipped read-only: flipped back at exit
@@ -77,6 +84,7 @@ STAMP_DATE=$(date +%Y-%m-%d)
 cleanup() {
   local rc=$?
   sync
+  [ -n "$INHIBIT_PID" ] && kill "$INHIBIT_PID" 2>/dev/null
   # whatever was answered so far is kept, even after a cancel or Ctrl-C
   [ "$MODE" = backup ] && save_prefs
   if [ -n "$DIAG" ]; then
