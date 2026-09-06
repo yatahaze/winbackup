@@ -59,7 +59,8 @@ SCRIPT_DIR=$(cd "$(dirname "$(readlink -f "$0")")" && pwd)
 EXC_FILE="$SCRIPT_DIR/winbackup-excludes.txt"
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/winbackup.XXXXXX")
 MNT=/mnt/winbackup
-OUR_MOUNTS=()
+OUR_MOUNTS=()      # mountpoints we created: unmounted at exit
+REMOUNT_RW=()      # desktop mounts we flipped read-only: flipped back at exit
 STAMP_DATE=$(date +%Y-%m-%d)
 
 cleanup() {
@@ -70,7 +71,8 @@ cleanup() {
   for (( i=${#OUR_MOUNTS[@]}-1; i>=0; i-- )); do
     umount "${OUR_MOUNTS[$i]}" 2>/dev/null || umount -l "${OUR_MOUNTS[$i]}" 2>/dev/null
   done
-  [ ${#OUR_MOUNTS[@]} -gt 0 ] && echo "Unmounted ${#OUR_MOUNTS[@]} drive(s). Safe to reboot/unplug."
+  for i in "${REMOUNT_RW[@]}"; do mount -o remount,rw "$i" 2>/dev/null; done
+  [ ${#OUR_MOUNTS[@]} -gt 0 ] && echo "Unmounted the ${#OUR_MOUNTS[@]} drive(s) this tool mounted. Drives the desktop had open are left as they were."
   rm -rf "$WORK"
   exit $rc
 }
@@ -200,11 +202,13 @@ mount_ro() {   # dev mountpoint [quiet]  (quiet = no interactive fallbacks; used
   fs=$(part_fstype "$dev")
   cur=$(current_mount "$dev")
   if [ -n "$cur" ]; then
-    # The live desktop auto-mounts drives read-write. Prefer to remount read-only ourselves;
-    # if it is busy (file manager open) we just use it as-is -- we never write to it either way.
-    if umount "$cur" 2>>"$WORK/mount.log"; then :; else
-      note "$dev is in use at $cur; using that mount (read only)."; echo "$cur"; return 0
+    # The live desktop auto-mounted it (read-write). Keep that mount so the user's file manager
+    # still sees the drive; just flip it read-only in place for the duration (restored at exit).
+    if [[ ",$(current_mount_opts "$dev")," == *,rw,* ]] && [ -z "$quiet" ]; then
+      if mount -o remount,ro "$cur" 2>>"$WORK/mount.log"; then REMOUNT_RW+=("$cur")
+      else note "$dev stays read-write at $cur (remount refused); nothing will be written to it."; fi
     fi
+    echo "$cur"; return 0
   fi
   mkdir -p "$mp"
   if [ "$fs" != ntfs ]; then
@@ -589,6 +593,23 @@ Choose No to create a new folder with the time appended instead."; then
     fi
   done
 
+  # ---- 5b. WSL2 / Hyper-V virtual disks (a whole Linux distro lives in one ext4.vhdx) ----
+  # Reported explicitly because they are easy to overlook and only copied if AppData\Local is on
+  # (Packages\*\LocalState and AppData\Local\wsl) or the containing root/other-drive folder is ticked.
+  local VHDX_TXT="" v vsz
+  for u in "${USERS[@]}"; do
+    while IFS= read -r v; do
+      vsz=$(stat -c %s "$v" 2>/dev/null || echo 0)
+      VHDX_TXT+="  $(hr "$vsz")  C:\\${v#"$SRC"/}"$'\n'
+    done < <(find "$SRC/Users/$u/AppData/Local" -maxdepth 4 -iname '*.vhdx' 2>/dev/null)
+  done
+  VHDX_TXT=${VHDX_TXT//\//\\}
+  local VHDX_NOTE=""
+  if [ -n "$VHDX_TXT" ]; then
+    if has local; then VHDX_NOTE="WSL/virtual disks found in AppData\\Local (INCLUDED):"$'\n'"$VHDX_TXT"
+    else VHDX_NOTE="WSL/virtual disks found but NOT included (AppData\\Local is unticked):"$'\n'"$VHDX_TXT"; fi
+  fi
+
   # ---- 6. Steam libraries anywhere on any NTFS drive ----
   # saves/settings = userdata (Steam Cloud saves, per-game config) + config (login, library list)
   # games          = steamapps (common/, manifests, workshop). Most games' own saves live in the
@@ -708,7 +729,9 @@ Selected data:      $(hr "$TOT_SEL")
 Already there:      $(hr $((TOT_SEL - TOT_XFER)))
 To copy now:        $(hr "$TOT_XFER")  ($TOT_N files)
 Excluded junk:      $(hr "$EXCL_TOTAL")  (full list: _excluded_summary.txt)
-Free on dest:       $(hr "$FREE")"
+Free on dest:       $(hr "$FREE")${VHDX_NOTE:+
+
+$VHDX_NOTE}"
   if [ "$TOT_XFER" -ge "$FREE" ]; then
     ask_msg "Not enough space" "$SUMMARY
 
@@ -802,6 +825,7 @@ Excluded:   $(hr "$EXCL_TOTAL") of junk (see _excluded_summary.txt)
 Errors:     $ERRN lines in _errors.log
 Verify:     $VRES
 On disk:    $(hr "$MAN_B") in $MAN_N files (_manifest.tsv)
+${VHDX_NOTE:-WSL/virtual disks: none found in the selected profiles}
 S
   write_readme "$DST" "${USERS[*]:-}" "$(tr '\n' ' ' <<<"$CATS")"
 
@@ -857,6 +881,11 @@ RESTORING (from Windows Explorer, after the fresh install)
   Steam games:     copy ...\\Steam\\steamapps\\common\\<Game> + the matching steamapps\\appmanifest_<id>.acf
                    into the new Steam library, then Steam > Library > Install (it will verify, not re-download).
   SSH/git/dev:     Users\\<name>\\.ssh, .gitconfig, .config, ... -> C:\\Users\\<newname>\\
+  WSL2 distro:     the whole distro is the ext4.vhdx under AppData\\Local\\Packages\\<distro>\\LocalState
+                   or AppData\\Local\\wsl\\<guid>. After installing WSL on the new system, copy the
+                   .vhdx somewhere permanent (e.g. C:\\WSL\\opensuse\\ext4.vhdx) and run in PowerShell:
+                     wsl --import-in-place openSUSE-Leap C:\\WSL\\opensuse\\ext4.vhdx
+                   Then: wsl -d openSUSE-Leap   (and  wsl --manage openSUSE-Leap --set-default-user <name>)
   Windows may ask for admin rights or complain about permissions: right-click > Properties >
   Security > Advanced > take ownership if a restored folder is not accessible.
 
