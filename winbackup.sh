@@ -870,7 +870,7 @@ PY
 
 # Stream the listed files into one store-only zip per pack folder. Resume: a zip that opens is skipped.
 read -r -d '' PY_PACK <<'PY'
-import sys, os, zipfile, time
+import sys, os, shutil, zipfile, time
 root, dest, listf, planf, statsf = sys.argv[1:6]
 plan = [l.rstrip('\n').split('\t') for l in open(planf, encoding='utf-8', errors='replace') if l.strip()]
 files = {}
@@ -883,8 +883,21 @@ def hr(n):
     for u in ('B','K','M','G','T'):
         if n < 1024 or u == 'T': return f'{n:.1f}{u}' if u != 'B' else f'{int(n)}B'
         n /= 1024
+# A zip stores DOS timestamps, which only cover 1980..2107: ZipFile.write() raises ValueError on
+# anything outside that, and one such file used to kill the whole packing run. Clamp instead.
+def zadd(zz, src, arc):
+    st = os.stat(src)
+    try: dt = time.localtime(st.st_mtime)[:6]
+    except (OverflowError, OSError, ValueError): dt = (1980, 1, 1, 0, 0, 0)
+    if dt[0] < 1980: dt = (1980, 1, 1, 0, 0, 0)
+    elif dt[0] > 2107: dt = (2107, 12, 31, 23, 59, 58)
+    zi = zipfile.ZipInfo(arc, dt)
+    zi.compress_type = zipfile.ZIP_STORED
+    zi.file_size = st.st_size
+    zi.external_attr = (st.st_mode & 0xFFFF) << 16
+    with open(src, 'rb') as fs, zz.open(zi, 'w') as fd: shutil.copyfileobj(fs, fd, 1 << 20)
 tb = sum(int(b) for _, _, b, s in plan if s != 'done'); tf = sum(int(c) for _, c, _, s in plan if s != 'done')
-done_b = done_f = 0; packed_f = packed_b = 0; errs = 0; t0 = time.time(); n = 0
+done_b = done_f = 0; packed_f = packed_b = 0; errs = 0; failed = 0; t0 = time.time(); n = 0
 for d, c, b, state in plan:
     n += 1; z = os.path.join(dest, d + '.zip'); disp = d.replace('/', '\\')
     if state == 'done':
@@ -892,22 +905,32 @@ for d, c, b, state in plan:
     members = sorted(p for p in files if p.startswith(d + '/'))
     os.makedirs(os.path.dirname(z), exist_ok=True)
     part = z + '.part'; base = os.path.basename(d); k = 0; zb = 0; last = 0.0
-    with zipfile.ZipFile(part, 'w', compression=zipfile.ZIP_STORED, allowZip64=True) as zz:
-        for p in members:
-            src = os.path.join(root, p); arc = base + '/' + p[len(d) + 1:]
-            try: zz.write(src, arc)
-            except OSError as e:
-                errs += 1; print(f'pack: skipped {p}: {e}', file=sys.stderr); continue
-            k += 1; zb += files[p]
-            if time.time() - last > 0.3:
-                el = time.time() - t0; rate = (done_b + zb) / el if el > 0 else 0
-                rem = (tb - done_b - zb) / rate if rate > 0 else 0
-                sys.stdout.write(f'\r\x1b[2K   [pack {n}/{len(plan)}] {disp}.zip  {k}/{len(members)} files  {hr(zb)}   '
-                                 f'| all packs {hr(done_b + zb)}/{hr(tb)}  {hr(rate)}/s  ETA {int(rem//3600)}:{int(rem%3600//60):02d}:{int(rem%60):02d}')
-                sys.stdout.flush(); last = time.time()
+    try:
+        with zipfile.ZipFile(part, 'w', compression=zipfile.ZIP_STORED, allowZip64=True) as zz:
+            for p in members:
+                src = os.path.join(root, p); arc = base + '/' + p[len(d) + 1:]
+                # one odd file must never abort the folder, let alone every folder after it
+                try: zadd(zz, src, arc)
+                except Exception as e:
+                    errs += 1; print(f'pack: skipped {p}: {e}', file=sys.stderr); continue
+                k += 1; zb += files[p]
+                if time.time() - last > 0.3:
+                    el = time.time() - t0; rate = (done_b + zb) / el if el > 0 else 0
+                    rem = (tb - done_b - zb) / rate if rate > 0 else 0
+                    sys.stdout.write(f'\r\x1b[2K   [pack {n}/{len(plan)}] {disp}.zip  {k}/{len(members)} files  {hr(zb)}   '
+                                     f'| all packs {hr(done_b + zb)}/{hr(tb)}  {hr(rate)}/s  ETA {int(rem//3600)}:{int(rem%3600//60):02d}:{int(rem%60):02d}')
+                    sys.stdout.flush(); last = time.time()
+    except Exception as e:
+        # leave it unpacked: pack_drive copies any folder with no .zip as plain files instead
+        failed += 1
+        try: os.remove(part)
+        except OSError: pass
+        sys.stdout.write(f'\r\x1b[2K   [pack {n}/{len(plan)}] {disp}.zip  FAILED: {e}\n'); sys.stdout.flush()
+        print(f'pack: FAILED {d}: {e}', file=sys.stderr)
+        continue
     os.replace(part, z); done_b += zb; done_f += k; packed_f += k; packed_b += zb
     sys.stdout.write(f'\r\x1b[2K   [pack {n}/{len(plan)}] {disp}.zip  {k} files  {hr(zb)}  done\n'); sys.stdout.flush()
-with open(statsf, 'w') as f: f.write(f'Total transferred file size: {packed_b} bytes\nNumber of regular files transferred: {packed_f}\nErrors: {errs}\n')
+with open(statsf, 'w') as f: f.write(f'Total transferred file size: {packed_b} bytes\nNumber of regular files transferred: {packed_f}\nErrors: {errs}\nFailed folders: {failed}\n')
 PY
 
 # Verify zips: quick = opens and member count matches the file list; full = CRC-read every member.
@@ -963,9 +986,30 @@ pack_drive() {
      --filter="merge $WORK/filter_$i" "${DRV_ROOT[$i]}/" "$WORK/empty_pack/" >"$WORK/packlist_$i" 2>>"$ERRLOG"
   [ "$DRY" = 1 ] && { echo "   (dry run) would pack $(wc -l <"$plan") folder(s)"; return 0; }
   echo "== ${DRV_NAME[$i]}: packing $(wc -l <"$plan") small-file folder(s) into .zip"
-  python3 -c "$PY_PACK" "${DRV_ROOT[$i]}" "$dest" "$WORK/packlist_$i" "$plan" "$WORK/packstats_$i" 2>>"$ERRLOG"
+  python3 -c "$PY_PACK" "${DRV_ROOT[$i]}" "$dest" "$WORK/packlist_$i" "$plan" "$WORK/packstats_$i" 2>>"$ERRLOG" \
+    || echo "   packing stopped early (see _errors.log)"
   PK_COPIED=$(stat_num "$WORK/packstats_$i" 'Total transferred file size')
   PK_NCOPIED=$(stat_num "$WORK/packstats_$i" 'Number of regular files transferred')
+  # Safety net. A pack folder is excluded from the normal rsync copy because it is meant to become a
+  # .zip, so a planned zip that is not on disk means that folder is in the backup nowhere at all.
+  # Copy those as plain files and drop them from the plan, so the manifest, _packed.txt and the
+  # verify pass never promise a zip that does not exist.
+  local d; : >"$WORK/packmiss_$i"
+  while IFS=$'\t' read -r d _; do
+    [ -n "$d" ] && { [ -f "$dest/$d.zip" ] || printf '%s\n' "$d" >>"$WORK/packmiss_$i"; }
+  done <"$plan"
+  if [ -s "$WORK/packmiss_$i" ]; then
+    echo "   !! $(wc -l <"$WORK/packmiss_$i") folder(s) could not be packed; copying them as plain files:"
+    tr '/' '\134' <"$WORK/packmiss_$i" | sed 's|^|      |'
+    write_unit_filter "$i" "$WORK/packmiss_$i" "$WORK/packmissfilter_$i"
+    rs "${RS_BASE[@]}" --stats --exclude-from="$EXC_USED" --filter="merge $WORK/packmissfilter_$i" \
+       --filter="merge $WORK/filter_$i" "${DRV_ROOT[$i]}/" "$dest/" >"$WORK/packmissout_$i" 2>>"$ERRLOG" || true
+    PK_COPIED=$((PK_COPIED + $(stat_num "$WORK/packmissout_$i" 'Total transferred file size')))
+    PK_NCOPIED=$((PK_NCOPIED + $(stat_num "$WORK/packmissout_$i" 'Number of regular files transferred')))
+    awk -F'\t' 'NR==FNR { m[$0]=1; next } !($1 in m)' "$WORK/packmiss_$i" "$plan" >"$plan.keep" && mv "$plan.keep" "$plan"
+    : >"$WORK/packx_$i"
+    cut -f1 "$plan" | while IFS= read -r d; do [ -n "$d" ] && echo "/$(esc "$d")/"; done >>"$WORK/packx_$i"
+  fi
 }
 
 # ================================================================= BACKUP
@@ -1634,7 +1678,8 @@ $( [ "$DRY" = 1 ] && echo 'DRY RUN: nothing will be written.' )" \
   if [ "$PACK" = 1 ] && [ -s "$WORK/packs_all.txt" ]; then
     { echo "# Folders packed as store-only .zip (one per line: zip path relative to this folder). Extract in place,"
       echo "# or run winbackup.sh --restore which unpacks them automatically."
-      cut -f4 "$WORK/packs_all.txt"; } >"$DST/_packed.txt"
+      # only zips that are really there: a folder the packer could not zip was copied as plain files
+      while IFS=$'\t' read -r _ _ _ z _; do [ -f "$DST/$z" ] && printf '%s\n' "$z"; done <"$WORK/packs_all.txt"; } >"$DST/_packed.txt"
   fi
   local MAN_N MAN_B; MAN_N=$(wc -l <"$DST/_manifest.tsv"); MAN_B=$(awk -F'\t' '{s+=$1} END{print s+0}' "$DST/_manifest.tsv")
   local T_END; T_END=$(now)

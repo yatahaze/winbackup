@@ -50,6 +50,9 @@ mkdir -p "$S/Users/bob/AppData/Local/BigApp/data" "$S/Users/bob/AppData/Local/Bi
 for n in $(seq 1 600); do printf 'f%s' "$n" >"$S/Users/bob/AppData/Local/BigApp/data/file$n.dat"; done
 printf 'junk' >"$S/Users/bob/AppData/Local/BigApp/Cache/c"
 printf 'cfg' >"$S/Users/bob/AppData/Local/BigApp/settings.ini"
+# a file older than the zip format's 1980 epoch: it must be clamped, not abort the packing run
+printf 'ancient' >"$S/Users/bob/AppData/Local/BigApp/data/1970.dat"
+touch -t 197001020304 "$S/Users/bob/AppData/Local/BigApp/data/1970.dat"
 mk "$S/Users/Alice Smith/Documents/notes [v2].txt" "brackets in a name"
 mk "$S/Users/Alice Smith/AppData/Roaming/App/x"
 mk "$S/Users/Public/Documents/shared.txt"
@@ -217,7 +220,7 @@ exists "$B6.zip"
 grep -q '^Verify:     OK' "$B6/_summary.txt" && ok || fail "saved verify choice not applied"
 cmp -s "$B/_manifest.tsv" "$B6/_manifest.tsv" && ok || { fail "parallel copy manifest differs from single-rsync copy"; diff "$B/_manifest.tsv" "$B6/_manifest.tsv" | head; }
 grep -q 'parallel workers' "$T/out1c" && ok || fail "parallel mode not used"
-grep -q 'copied this run: 38.2MB in 631 files' "$B6/_summary.txt" && ok || { fail "parallel stats not summed"; grep 'copied this run' "$B6/_summary.txt"; }
+grep -q 'copied this run: 38.2MB in 632 files' "$B6/_summary.txt" && ok || { fail "parallel stats not summed"; grep 'copied this run' "$B6/_summary.txt"; }
 grep -c '(saved)' "$T/err1c" | grep -q '^[0-9]' && ok
 
 echo "=== run 2: resume after a simulated crash (adds one file; a corrupted file and an rsync temp file are left behind)"
@@ -425,13 +428,16 @@ import sys, zipfile
 z = zipfile.ZipFile(sys.argv[1]); n = z.namelist()
 assert 'BigApp/data/file600.dat' in n and 'BigApp/settings.ini' in n, n[:5]
 assert not any('Cache' in x for x in n), [x for x in n if 'Cache' in x]
-assert len([x for x in n if not x.endswith('/')]) == 601, len(n)
+assert len([x for x in n if not x.endswith('/')]) == 602, len(n)
+old = z.getinfo('BigApp/data/1970.dat')
+assert old.date_time == (1980, 1, 1, 0, 0, 0), old.date_time
+assert z.read(old) == b'ancient'
 assert z.testzip() is None
 PY
 grep -q 'Users/bob/AppData/Local/BigApp.zip' "$B11/_packed.txt" && ok || fail "_packed.txt missing"
 grep -q $'\tUsers/bob/AppData/Local/BigApp/data/file1.dat\tin ' "$B11/_manifest.tsv" && ok || { fail "manifest lacks zip members"; grep -c BigApp "$B11/_manifest.tsv"; }
 grep -q '^Verify:     OK' "$B11/_summary.txt" && ok || { fail "verify with packing not OK"; cat "$B11/_verify.log"; }
-grep -q 'copied this run: .* in 6[0-9][0-9] files' "$B11/_summary.txt" && ok || { fail "pack stats not counted"; grep 'copied this run' "$B11/_summary.txt"; }
+grep -q 'copied this run: .* in [67][0-9][0-9] files' "$B11/_summary.txt" && ok || { fail "pack stats not counted"; grep 'copied this run' "$B11/_summary.txt"; }
 printf 'fresh\n/\n@default\nyes\nbob\ndocs;local\nstart\nno\nskip\n' >"$T/a4h"
 WB_PREFS=$T/prefs4g bash "$SCRIPT" --pack --src "$S" --dst "$D11" --answers "$T/a4h" >"$T/out4h" 2>"$T/err4h"; rc=$?
 [ $rc = 0 ] && ok || { fail "run 4h exit $rc"; tail -20 "$T/err4h"; }
